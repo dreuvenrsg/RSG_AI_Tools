@@ -43,12 +43,26 @@ export async function indexTicket(id, { zendesk, embeddings, force = false } = {
   return { ticketId: meta.id, chunks: chunks.length, embedded: misses.length, cached: chunks.length - misses.length, skipped: false };
 }
 
+/** Run `fn` over items with at most `limit` in flight at once. */
+async function mapWithConcurrency(items, limit, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+}
+
 /**
  * Walk the Incremental Ticket Export from the stored cursor (or `since`),
  * indexing each changed ticket and advancing the cursor by end_time. Bounded by
- * maxTickets to keep a single run sane.
+ * maxTickets to keep a single run sane. Tickets within a page are indexed with
+ * bounded concurrency (each ticket is independent — its own transaction); 429s
+ * self-throttle via the Zendesk client's retry/backoff.
  */
-export async function runReconcile({ zendesk, embeddings, since = null, maxTickets = 5000, onProgress = () => {} } = {}) {
+export async function runReconcile({ zendesk, embeddings, since = null, maxTickets = 5000, concurrency = 1, onProgress = () => {} } = {}) {
   let cursor = since != null ? Math.floor(since) : await store.getCursor();
   if (cursor == null) cursor = Math.floor(Date.now() / 1000) - 30 * 24 * 3600; // first run: last 30 days
   let processed = 0;
@@ -56,16 +70,16 @@ export async function runReconcile({ zendesk, embeddings, since = null, maxTicke
 
   while (processed < maxTickets) {
     const { tickets, endTime, hasMore } = await zendesk.incrementalTickets(cursor);
-    for (const t of tickets) {
+    const batch = tickets.slice(0, Math.max(0, maxTickets - processed));
+    await mapWithConcurrency(batch, concurrency, async (t) => {
       try {
         const r = await indexTicket(t.id, { zendesk, embeddings });
         onProgress({ ticketId: t.id, ...r });
       } catch (err) {
         onProgress({ ticketId: t.id, error: err.message });
       }
-      processed++;
-      if (processed >= maxTickets) break;
-    }
+    });
+    processed += batch.length;
     pages++;
     if (endTime != null) {
       cursor = endTime;
@@ -73,7 +87,7 @@ export async function runReconcile({ zendesk, embeddings, since = null, maxTicke
     }
     // Incremental export returns end_of_stream when caught up; also guard the
     // documented "same start_time echoed back" terminal case.
-    if (!hasMore || !tickets.length) break;
+    if (!hasMore || !tickets.length || processed >= maxTickets) break;
   }
   return { processed, pages, cursor };
 }

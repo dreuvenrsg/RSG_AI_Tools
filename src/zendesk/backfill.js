@@ -16,14 +16,16 @@ async function main() {
   const arg = process.argv[2];
   const since = arg != null ? Number(arg) : 0;
   const maxTickets = Number(process.env.ZENDESK_BACKFILL_MAX || 100000);
+  const concurrency = Number(process.env.ZENDESK_BACKFILL_CONCURRENCY || 8);
 
   const [zendesk, embeddings] = await Promise.all([ZendeskClient.create(), EmbeddingsClient.create()]);
-  console.error(`[zendesk] backfilling from ${since} (max ${maxTickets} tickets)...`);
+  console.error(`[zendesk] backfilling from ${since} (max ${maxTickets} tickets, concurrency ${concurrency})...`);
   const result = await runReconcile({
     zendesk,
     embeddings,
     since,
     maxTickets,
+    concurrency,
     onProgress: (p) =>
       p.error
         ? console.error(`  ticket ${p.ticketId}: ERROR ${p.error}`)
