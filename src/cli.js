@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { QboClient } from "./qbo/client.js";
 import { FulcrumClient } from "./fulcrum/client.js";
+import { ZendeskSearch } from "./zendesk/search.js";
 import { tools, getTool } from "./tools/index.js";
 
 function usage() {
@@ -42,13 +43,16 @@ async function main() {
   // search, notes) shouldn't demand QBO/Fulcrum credentials to run.
   const needsQbo = name.startsWith("qbo_");
   const needsFulcrum = name.startsWith("fulcrum_");
-  if (needsQbo || needsFulcrum) console.error(`[cli] Initializing ${[needsQbo && "QBO", needsFulcrum && "Fulcrum"].filter(Boolean).join(" + ")} client...`);
-  const [qbo, fulcrum] = await Promise.all([
+  const needsZendesk = name.startsWith("zendesk_");
+  if (needsQbo || needsFulcrum || needsZendesk)
+    console.error(`[cli] Initializing ${[needsQbo && "QBO", needsFulcrum && "Fulcrum", needsZendesk && "Zendesk"].filter(Boolean).join(" + ")} client...`);
+  const [qbo, fulcrum, zendesk] = await Promise.all([
     needsQbo ? QboClient.create() : null,
     needsFulcrum ? FulcrumClient.create() : null,
+    needsZendesk ? ZendeskSearch.create() : null,
   ]);
   console.error(`[cli] Running ${name}...`);
-  const result = await tool.run(input, { qbo, fulcrum });
+  const result = await tool.run(input, { qbo, fulcrum, zendesk });
 
   if (result && typeof result.csv === "string") {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

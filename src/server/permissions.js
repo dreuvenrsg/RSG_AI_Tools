@@ -24,6 +24,9 @@ export const TOOL_ACCESS = {
   fulcrum_purchasing_request: ["quality_control", ...FINANCE],
   fulcrum_sales_request: ["customer_service", ...FINANCE],
   fulcrum_api_request: FINANCE, // the unrestricted ERP explorer (read-only)
+  // Zendesk ticket search: all admin roles for now (CS + finance both need it).
+  // Narrow later by changing ALL to a smaller role list.
+  zendesk_ticket_search: ALL,
   save_operational_note: ALL,
   // Backend log search: logs hold every user's questions and tool inputs,
   // so only super admins may read them.

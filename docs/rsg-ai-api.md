@@ -30,6 +30,22 @@ RSG_AI_API_KEY=<shared secret> ANTHROPIC_API_KEY=<anthropic key> npm run rsg-ai
 | `RSG_AI_LOG_FILE` | no | Mirror the JSONL request log to a file (stdout always gets it) |
 | AWS credentials | yes | SSM read for QBO creds (`/qbo-invoice-sender/prod/*`), region `us-west-1` |
 
+**Zendesk ticket search (optional)** — enables `zendesk_ticket_search` and the
+`/api/zendesk/webhook` ingestion. Each value falls back to SSM under
+`/rsg-ai/prod/` if the env var is unset; if none are configured, the tool simply
+reports itself unavailable and the rest of the agent is unaffected.
+
+| Env var | SSM fallback | Meaning |
+|---|---|---|
+| `DATABASE_URL` | `/rsg-ai/prod/database-url` | Postgres/pgvector (RSG_Website's Vercel/Neon DB) |
+| `VOYAGE_API_KEY` | `/rsg-ai/prod/voyage-api-key` | Voyage embeddings key (`voyage-3-large`, 1024-dim) |
+| `ZENDESK_TOKEN` / `ZENDESK_EMAIL` | `/rsg-ai/prod/zendesk-token`, `.../zendesk-email` | Zendesk API Basic auth (subdomain `rsgsecurity`) |
+| `ZENDESK_WEBHOOK_SECRET` | `/rsg-ai/prod/zendesk-webhook-secret` | HMAC secret for `/api/zendesk/webhook` |
+| `ZENDESK_RECONCILE_MINUTES` | — | Reconcile interval (default 15); `ZENDESK_SYNC_ENABLED=false` disables the timer |
+
+Schema lives in `src/zendesk/schema.sql` — apply once with `npm run zendesk:migrate`,
+seed with `npm run zendesk:backfill`.
+
 ## Endpoints
 
 All endpoints except `/healthz` require `Authorization: Bearer <RSG_AI_API_KEY>`.
@@ -111,6 +127,19 @@ curl -N http://localhost:8787/api/chat \
   -d '{"messages":[{"role":"user","content":"How was the MIRCOM payment ref F9170 applied?"}]}'
 ```
 
+### `POST /api/zendesk/webhook`
+
+**Not called by the website** — this is the ingestion hook for Zendesk itself.
+Authenticated by Zendesk's HMAC signature (headers `X-Zendesk-Webhook-Signature`
++ `X-Zendesk-Webhook-Signature-Timestamp`, secret in SSM
+`/rsg-ai/prod/zendesk-webhook-secret`), **not** the bearer key, so it sits before
+the bearer gate. Configure a Zendesk webhook/trigger on ticket create/update to
+POST a body carrying the ticket id (`{"ticket_id":"{{ticket.id}}"}` works; the
+handler also reads `id` / `ticket.id` / `detail.id`). It verifies the signature,
+acks `{ ok: true, ticketId }` immediately, then re-indexes the ticket in the
+background (replacing its vector rows — no duplication). Bad/absent signature →
+401; missing ticket id → 400.
+
 ## Roles & tool access
 
 `role` (body field or `X-RSG-Role` header) must be one of the website's
@@ -127,6 +156,7 @@ the model and re-checked at dispatch.
 | `fulcrum_purchasing_request` | ✓ | ✓ | ✓ | |
 | `fulcrum_sales_request` | ✓ | ✓ | | ✓ |
 | `fulcrum_api_request` (unrestricted) | ✓ | ✓ | | |
+| `zendesk_ticket_search` | ✓ | ✓ | ✓ | ✓ |
 | `save_operational_note` | ✓ | ✓ | ✓ | ✓ |
 | `rsg_ai_log_search` (backend logs) | ✓ | | | |
 
@@ -150,6 +180,14 @@ key from SSM `/rsg-ai/prod/fulcrum-api-key` or `FULCRUM_API_KEY` env)
 - `fulcrum_sales_request` — sales/CS scope: sales orders and line items,
   quotes, customers, shipments/tracking, Fulcrum invoices, production jobs.
 - `fulcrum_api_request` — the unrestricted explorer (admins only).
+
+**zendesk/** (semantic search over vectorized tickets — Postgres/pgvector +
+Voyage embeddings; see `src/zendesk/` and spec 009)
+- `zendesk_ticket_search` — natural-language search over ticket history (full
+  thread incl. internal notes, tags, status, requester, linked tickets), with
+  optional status/tags/date/requester filters. Returns cited Zendesk deep links
+  and linked-ticket ids. All admin roles. Tickets are kept current by the
+  `/api/zendesk/webhook` hook plus a periodic incremental-export reconciliation.
 
 **system/**
 - `save_operational_note` — the agent's self-improvement loop: durable

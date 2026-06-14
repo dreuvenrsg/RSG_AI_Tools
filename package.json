@@ -12,6 +12,8 @@
     "test": "node --test tests/*.test.js",
     "rsg-ai": "node src/server/index.js",
     "rsg-ai:deploy": "bash deploy/deploy.sh",
+    "zendesk:migrate": "node src/zendesk/migrate.js",
+    "zendesk:backfill": "node src/zendesk/backfill.js",
     "build": "sam build",
     "deploy-guided": "sam deploy --guided",
     "deploy": "sam build && sam deploy --no-confirm-changeset --stack-name rsg-invoice-processor --resolve-s3 --capabilities CAPABILITY_IAM",
@@ -28,6 +30,7 @@
     "@aws-sdk/client-ssm": "^3.470.0",
     "@sparticuz/chromium": "^143.0.4",
     "exceljs": "^4.4.0",
+    "pg": "^8.21.0",
     "puppeteer-core": "^24.38.0"
   },
   "devDependencies": {

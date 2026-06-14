@@ -37,12 +37,24 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `src/qbo/config.js` | QBO env config; credentials resolve env → SSM (no hardcoded secrets) |
 | `src/qbo/client.js` | Read-focused QBO API client; SSM-backed OAuth with refresh-token rotation shared with the Lambda |
 | `src/fulcrum/client.js` | Read-only Fulcrum Pro API client (GET + POST `.../list` only — mutations refused in code); key from env/SSM |
+| `src/zendesk/client.js` | Zendesk API client (Basic auth, env/SSM); ticket-bundle fetch (sideloaded users/groups/orgs + comments + incidents) and incremental export |
+| `src/zendesk/embeddings.js` | Voyage AI embeddings client (`voyage-3-large`, 1024-dim) over fetch; document/query input types |
+| `src/zendesk/document.js` | **Pure**: normalize a Zendesk bundle → meta; build the structured header + thread; deterministic chunking |
+| `src/zendesk/store.js` | Postgres + pgvector store: `replaceTicket` (transactional delete+insert + cache), cosine `search`, embedding cache, sync cursor |
+| `src/zendesk/indexer.js` | Orchestration: `indexTicket` (fetch→build→embed-with-cache→replace) and `runReconcile` (incremental export loop) |
+| `src/zendesk/search.js` | `ZendeskSearch` facade wired as `ctx.zendesk`: embeds the query, runs the search, shapes citable hits |
+| `src/zendesk/webhookAuth.js` | **Pure** Zendesk webhook HMAC-SHA256 signature verification |
+| `src/zendesk/schema.sql` | pgvector DDL: `zendesk_ticket_chunks`, `zendesk_embedding_cache`, `zendesk_sync_state` (owned here, lives in RSG_Website's Postgres) |
+| `src/zendesk/migrate.js` | Applies `schema.sql` (`npm run zendesk:migrate`) |
+| `src/zendesk/backfill.js` | Initial/catch-up backfill via incremental export (`npm run zendesk:backfill`) |
 | `src/lib/allocation.js` | Pure money math: integer-cent largest-remainder allocation, weight strategies |
 | `src/lib/csv.js` | Minimal RFC-4180 CSV serializer |
+| `src/lib/ssm.js` | Shared secret loader: env override → SSM SecureString (used by qbo/fulcrum/zendesk/voyage) |
 | `src/tools/index.js` | Tool registry — every agent capability registers here as `{ definition, run }` |
 | `src/tools/accounting/landedCost.js` | `qbo_landed_cost_report`: per-part spend with freight/tariff/fee/tax allocation |
 | `src/tools/accounting/cashApplication.js` | `qbo_cash_application_lookup`: how customer payments were applied to AR invoices |
 | `src/tools/fulcrum/apiRequest.js` | Fulcrum tool factory: unrestricted explorer + purchasing-scoped + sales-scoped variants |
+| `src/tools/zendesk/ticketSearch.js` | `zendesk_ticket_search`: semantic search over vectorized tickets, returns cited deep links |
 | `src/tools/system/saveNote.js` | `save_operational_note`: agent appends verified discoveries to its learned knowledge |
 | `src/tools/system/logSearch.js` | `rsg_ai_log_search`: searches the backend's CloudWatch logs by chatId/user/type/text (super-admin) |
 | `src/server/index.js` | Agent API HTTP server: `POST /api/chat` (SSE), `GET /api/tools`, `/healthz`; bearer auth; audit logging |
@@ -53,6 +65,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `src/server/permissions.js` | Role→tool access matrix (mirrors RSG_Website `lib/roles.ts` by design) + denial message |
 | `src/server/knowledge/accounting.md` | Curated: QBO bookkeeping conventions (part-number prefixes, overhead lines) |
 | `src/server/knowledge/fulcrum.md` | Curated: Fulcrum API behavior (list conventions, **sorting ignored**, lookup trails) |
+| `src/server/knowledge/zendesk.md` | Curated: how/when to use ticket search, cite deep links, surface linked tickets |
 | `src/server/knowledge/learned.md` | Agent-written notes via `save_operational_note`; review via git diff |
 
 ## Deployment (`deploy/`)
@@ -83,6 +96,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `specs/006-file-uploads.md` | Upload normalization: images/PDF/text/Excel |
 | `specs/007-role-scoped-tools.md` | Role-based tool access + purchasing/sales scoped Fulcrum tools |
 | `specs/008-chat-debugging-logs.md` | chatId-tagged logs, CloudWatch durability, and the agent's log-search tool |
+| `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + Voyage); webhook + reconcile ingestion; semantic search tool |
 
 ## Tests
 

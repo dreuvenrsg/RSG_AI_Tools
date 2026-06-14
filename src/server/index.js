@@ -10,11 +10,25 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { QboClient } from "../qbo/client.js";
 import { FulcrumClient } from "../fulcrum/client.js";
+import { ZendeskSearch } from "../zendesk/search.js";
+import { ZendeskClient } from "../zendesk/client.js";
+import { VoyageClient } from "../zendesk/embeddings.js";
+import { indexTicket, runReconcile } from "../zendesk/indexer.js";
+import { verifyZendeskSignature, SIGNATURE_HEADER, TIMESTAMP_HEADER } from "../zendesk/webhookAuth.js";
+import { loadSecret } from "../lib/ssm.js";
 import { toolDefinitions } from "../tools/index.js";
 import { runAgentTurn, resolveAnthropicClient, DEFAULT_MODEL } from "./agentLoop.js";
 import { createLogger, truncate, lastUserText } from "./log.js";
 import { normalizeMessages } from "./attachments.js";
 import { isValidRole, toolNamesForRole, PERMISSION_MESSAGE } from "./permissions.js";
+
+export const ZENDESK_WEBHOOK_SECRET_PARAM = "/rsg-ai/prod/zendesk-webhook-secret";
+
+/** Pull the ticket id out of whatever shape the Zendesk webhook is configured to send. */
+export function ticketIdFromWebhook(payload = {}) {
+  const id = payload.ticket_id ?? payload.id ?? payload.ticket?.id ?? payload.detail?.id;
+  return id != null && id !== "" ? Number(id) : null;
+}
 
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // remittance PDFs ride in as base64
 
@@ -73,6 +87,23 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
     fulcrumPromise = null;
     throw err;
   }));
+  // Zendesk search is optional infra (needs DATABASE_URL + Voyage). Resolve to
+  // null on failure so the rest of the agent still works without it; the tool
+  // surfaces a clear message when null.
+  let zendeskPromise = null;
+  const getZendesk = () => (zendeskPromise ??= ZendeskSearch.create().catch((err) => {
+    zendeskPromise = null;
+    console.warn("[rsg-ai] Zendesk search unavailable:", err.message);
+    return null;
+  }));
+  // Indexing deps (Zendesk API + Voyage) + webhook secret, for the webhook route.
+  let indexerPromise = null;
+  const getZendeskIndexer = () => (indexerPromise ??= Promise.all([ZendeskClient.create(), VoyageClient.create()])
+    .then(([zendesk, voyage]) => ({ zendesk, voyage }))
+    .catch((err) => { indexerPromise = null; throw err; }));
+  let webhookSecretPromise = null;
+  const getWebhookSecret = () => (webhookSecretPromise ??= loadSecret(ZENDESK_WEBHOOK_SECRET_PARAM, { env: "ZENDESK_WEBHOOK_SECRET" })
+    .catch((err) => { webhookSecretPromise = null; throw err; }));
 
   const log = createLogger();
 
@@ -94,6 +125,39 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
 
       if (url.pathname === "/healthz") {
         return json(res, 200, { ok: true, model: DEFAULT_MODEL }, corsOrigin);
+      }
+
+      // Zendesk webhook: authenticated by HMAC signature, NOT the bearer key,
+      // so it sits before the bearer gate. Acknowledges fast, then re-indexes
+      // the ticket in the background (replacing its rows — no duplication).
+      if (req.method === "POST" && url.pathname === "/api/zendesk/webhook") {
+        const raw = await readBody(req);
+        let secret;
+        try {
+          secret = await getWebhookSecret();
+        } catch (err) {
+          return json(res, 503, { error: "Webhook secret not configured" }, corsOrigin);
+        }
+        const valid = verifyZendeskSignature({
+          signature: req.headers[SIGNATURE_HEADER],
+          timestamp: req.headers[TIMESTAMP_HEADER],
+          body: raw,
+          secret,
+        });
+        if (!valid) return json(res, 401, { error: "Invalid signature" }, corsOrigin);
+
+        let payload = {};
+        try { payload = JSON.parse(raw); } catch { /* tolerate non-JSON bodies */ }
+        const ticketId = ticketIdFromWebhook(payload);
+        if (!ticketId) return json(res, 400, { error: "No ticket id in payload" }, corsOrigin);
+
+        json(res, 200, { ok: true, ticketId }, corsOrigin);
+        // Fire-and-forget: the response is already sent.
+        getZendeskIndexer()
+          .then((deps) => indexTicket(ticketId, deps))
+          .then((r) => log({ type: "zendesk_index", requestId, ticketId, ...r }))
+          .catch((err) => log({ type: "zendesk_index_error", requestId, ticketId, error: err.message }));
+        return;
       }
 
       if (!isAuthorized(req, apiKey)) {
@@ -151,12 +215,12 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
         }
 
         let assistantText = "";
-        const [anthropic, qbo, fulcrum] = await Promise.all([getAnthropic(), getQbo(), getFulcrum()]);
+        const [anthropic, qbo, fulcrum, zendesk] = await Promise.all([getAnthropic(), getQbo(), getFulcrum(), getZendesk()]);
         const { newMessages, stopReason, usage } = await runAgentTurn({
           client: anthropic,
           messages,
           model,
-          ctx: { qbo, fulcrum },
+          ctx: { qbo, fulcrum, zendesk },
           allowedTools: toolNamesForRole(role),
           onEvent: (event) => {
             if (event.type === "text") assistantText += event.text;
@@ -198,10 +262,38 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
   });
 }
 
+/**
+ * Periodic safety-net reconciliation: walks the Zendesk Incremental Export from
+ * the stored cursor and re-indexes anything the webhook missed (e.g. while the
+ * box was redeploying). Started only by the live server, not by tests. Disable
+ * with ZENDESK_SYNC_ENABLED=false. Returns the interval handle (or null).
+ */
+export function startReconcileLoop({ minutes = Number(process.env.ZENDESK_RECONCILE_MINUTES) || 15 } = {}) {
+  if (process.env.ZENDESK_SYNC_ENABLED === "false") return null;
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const [zendesk, voyage] = await Promise.all([ZendeskClient.create(), VoyageClient.create()]);
+      const r = await runReconcile({ zendesk, voyage, maxTickets: Number(process.env.ZENDESK_RECONCILE_MAX) || 500 });
+      console.log(`[zendesk] reconcile: ${JSON.stringify(r)}`);
+    } catch (err) {
+      console.warn("[zendesk] reconcile skipped:", err.message);
+    } finally {
+      running = false;
+    }
+  };
+  const handle = setInterval(tick, minutes * 60 * 1000);
+  handle.unref?.();
+  return handle;
+}
+
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
   const port = Number(process.env.PORT) || 8787;
   createServer().listen(port, () => {
     console.log(`[rsg-ai] agent API listening on :${port} (model: ${DEFAULT_MODEL})`);
+    startReconcileLoop();
   });
 }

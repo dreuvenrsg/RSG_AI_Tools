@@ -211,7 +211,7 @@ test("summarizePayment maps linked invoices and amounts", () => {
 
 test("tool definitions are valid Anthropic tool-use shapes", () => {
   const defs = toolDefinitions();
-  assert.equal(defs.length, 7);
+  assert.equal(defs.length, 8);
   for (const d of defs) {
     assert.match(d.name, /^[a-z0-9_]+$/);
     assert.ok(d.description.length > 20);
