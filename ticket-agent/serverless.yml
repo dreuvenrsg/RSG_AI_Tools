@@ -1,0 +1,143 @@
+service: po-processor
+frameworkVersion: "3"
+
+useDotenv: true
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  region: ${env:AWS_REGION, 'us-west-1'}
+  sesRegion: ${env:SES_REGION, self:custom.region}
+  # ⚠️ CRITICAL: S3 bucket MUST be in the same region as the Lambda functions
+  fulcrumItemsBucket: ${env:FULCRUM_ITEMS_BUCKET, 'fulcrum-items-sync-prod'}
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: "node22"
+    platform: "node"
+    concurrency: 10
+    define:
+      "require.resolve": undefined
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  stage: ${opt:stage, 'prod'}
+  region: ${self:custom.region}
+  memorySize: 512
+  timeout: 30
+  logRetentionInDays: 7
+  environment:
+    # Zendesk
+    ZENDESK_SUBDOMAIN: ${env:ZENDESK_SUBDOMAIN}
+    ZENDESK_EMAIL: ${env:ZENDESK_EMAIL}
+    ZENDESK_API_TOKEN: ${env:ZENDESK_API_TOKEN}
+    ZENDESK_WEBHOOK_TOKEN: ${env:ZENDESK_WEBHOOK_TOKEN}
+
+    # OpenAI
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+    OPENAI_REQUEST_TIMEOUT_MS: ${env:OPENAI_REQUEST_TIMEOUT_MS, '420000'}
+
+    # Zendesk Custom Fields
+    PO_STATUS_FIELD_ID: ${env:PO_STATUS_FIELD_ID}
+    PO_RESULT_SHA_FIELD_ID: ${env:PO_RESULT_SHA_FIELD_ID}
+    PO_JSON_ATTACHMENT_ID_FIELD_ID: ${env:PO_JSON_ATTACHMENT_ID_FIELD_ID}
+
+    # Email Notifications
+    SES_REGION: ${self:custom.sesRegion}
+    SES_FROM: ${env:SES_FROM}
+    NOTIFY_EMAIL: ${env:NOTIFY_EMAIL}
+    NOTIFY_SUBJECT_PREFIX: ${env:NOTIFY_SUBJECT_PREFIX, '[PO Pipeline]'}
+
+    # Fulcrum Items S3 Bucket (⚠️ MUST MATCH REGION)
+    FULCRUM_ITEMS_BUCKET: ${self:custom.fulcrumItemsBucket}
+
+    # Fulcrum API
+    FULCRUM_TOKEN: ${env:FULCRUM_TOKEN}
+    FULCRUM_DOMAIN: ${env:FULCRUM_DOMAIN}
+
+  iam:
+    role:
+      statements:
+        # ingest -> SQS (send)
+        - Effect: Allow
+          Action: sqs:SendMessage
+          Resource:
+            Fn::GetAtt: [PoQueue, Arn]
+
+        # worker -> SQS (poll & delete)
+        - Effect: Allow
+          Action:
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:ChangeMessageVisibility
+            - sqs:GetQueueAttributes
+            - sqs:GetQueueUrl
+          Resource:
+            Fn::GetAtt: [PoQueue, Arn]
+
+        # worker -> S3 (read Fulcrum items data)
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.fulcrumItemsBucket}
+            - arn:aws:s3:::${self:custom.fulcrumItemsBucket}/*
+
+        # worker -> SES (send email)
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+
+functions:
+  ingest:
+    handler: src/handler.ingest
+    timeout: 10
+    memorySize: 512
+    environment:
+      PO_QUEUE_URL: !Ref PoQueue
+    events:
+      - httpApi:
+          path: /ingest
+          method: post
+
+  worker:
+    handler: src/handler.worker
+    timeout: 900
+    memorySize: 1024
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [PoQueue, Arn]
+          batchSize: 1
+          maximumBatchingWindow: 0
+
+resources:
+  Resources:
+    PoQueueDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: po-processor-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
+    PoQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: po-processor-queue-${self:provider.stage}
+        VisibilityTimeout: 960
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [PoQueueDLQ, Arn]
+          maxReceiveCount: 3  # Max 3 retry attempts (down from 5)
+
+package:
+  individually: true
+  patterns:
+    - '!node_modules/**'
+    - '!dist/**'
+    - '!tests/**'
+    - '!*.md'
