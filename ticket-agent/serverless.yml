@@ -36,9 +36,12 @@ provider:
     ZENDESK_API_TOKEN: ${env:ZENDESK_API_TOKEN}
     ZENDESK_WEBHOOK_TOKEN: ${env:ZENDESK_WEBHOOK_TOKEN}
 
-    # OpenAI
+    # OpenAI (deterministic PO/PDF pipeline)
     OPENAI_API_KEY: ${env:OPENAI_API_KEY}
     OPENAI_REQUEST_TIMEOUT_MS: ${env:OPENAI_REQUEST_TIMEOUT_MS, '420000'}
+
+    # Anthropic (customer-service agent; falls back to SSM /rsg-ai/prod/anthropic-api-key if empty)
+    ANTHROPIC_TOKEN: ${env:ANTHROPIC_TOKEN, ''}
 
     # Zendesk Custom Fields
     PO_STATUS_FIELD_ID: ${env:PO_STATUS_FIELD_ID}
