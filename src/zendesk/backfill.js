@@ -26,10 +26,11 @@ async function main() {
     since,
     maxTickets,
     concurrency,
-    onProgress: (p) =>
-      p.error
-        ? console.error(`  ticket ${p.ticketId}: ERROR ${p.error}`)
-        : console.error(`  ticket ${p.ticketId}: ${p.skipped ? "skip" : `${p.chunks} chunks (${p.embedded} embedded)`}`),
+    onProgress: (p) => {
+      if (p.skippedUnchanged) console.error(`  (skipped ${p.skippedUnchanged} unchanged — no fetch)`);
+      else if (p.error) console.error(`  ticket ${p.ticketId}: ERROR ${p.error}`);
+      else console.error(`  ticket ${p.ticketId}: ${p.skipped ? "skip" : `${p.chunks} chunks (${p.embedded} embedded)`}`);
+    },
   });
   console.log(JSON.stringify(result, null, 2));
   await (await getPool()).end();

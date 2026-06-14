@@ -71,7 +71,17 @@ export async function runReconcile({ zendesk, embeddings, since = null, maxTicke
   while (processed < maxTickets) {
     const { tickets, endTime, hasMore } = await zendesk.incrementalTickets(cursor);
     const batch = tickets.slice(0, Math.max(0, maxTickets - processed));
-    await mapWithConcurrency(batch, concurrency, async (t) => {
+    // Skip already-current tickets using the updated_at the export already
+    // carries — no per-ticket bundle fetch for tickets we've indexed at this
+    // version. Big win on a full backfill (most tickets are unchanged) and far
+    // gentler on Zendesk's shared rate limit.
+    const stored = await store.getTicketUpdatedAtBatch(batch.map((t) => Number(t.id)));
+    const changed = batch.filter((t) => {
+      const prev = stored.get(Number(t.id));
+      return !prev || !t.updated_at || new Date(t.updated_at) > new Date(prev);
+    });
+    if (batch.length - changed.length) onProgress({ skippedUnchanged: batch.length - changed.length });
+    await mapWithConcurrency(changed, concurrency, async (t) => {
       try {
         const r = await indexTicket(t.id, { zendesk, embeddings });
         onProgress({ ticketId: t.id, ...r });

@@ -58,6 +58,21 @@ export async function getTicketUpdatedAt(ticketId) {
   return rows[0]?.updated_at || null;
 }
 
+/** Stored updated_at for many tickets at once → Map(ticketId → Date). Lets the
+ *  reconcile/backfill walk skip already-current tickets WITHOUT the expensive
+ *  per-ticket bundle fetch (the incremental export already carries updated_at). */
+export async function getTicketUpdatedAtBatch(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const pool = await getPool();
+  const { rows } = await pool.query(
+    `select ticket_id, max(updated_at) as updated_at from zendesk_ticket_chunks where ticket_id = any($1) group by ticket_id`,
+    [ids]
+  );
+  for (const r of rows) out.set(Number(r.ticket_id), r.updated_at);
+  return out;
+}
+
 /** Cached embeddings for a set of text hashes → Map(sha → number[]). */
 export async function getCachedEmbeddings(hashes) {
   const out = new Map();
