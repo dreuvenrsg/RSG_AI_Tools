@@ -22,11 +22,17 @@ export async function getPool() {
     const url = await loadSecret(DATABASE_URL_PARAM, { env: "DATABASE_URL" });
     const local = /localhost|127\.0\.0\.1/.test(url);
     // Keep the pool small — Neon has a low connection ceiling.
-    return new pg.Pool({
+    const pool = new pg.Pool({
       connectionString: url,
       max: Number(process.env.PG_POOL_MAX || 4),
       ssl: local ? undefined : { rejectUnauthorized: false },
     });
+    // Neon drops idle connections on autosuspend / compute restarts (e.g. plan
+    // changes). pg.Pool emits 'error' on idle clients then; without a handler
+    // Node treats it as uncaught and crashes the process. Log + let the pool
+    // evict the dead client — the next query lazily reconnects.
+    pool.on("error", (err) => console.error("[zendesk] pg pool idle-client error (recoverable):", err.message));
+    return pool;
   })());
 }
 
