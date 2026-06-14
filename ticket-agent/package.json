@@ -1,0 +1,34 @@
+{
+  "name": "ticket-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/local.ts",
+    "test:ticket-primitives": "tsx test-ticket-primitives.ts",
+    "test:open-order-report:live": "tsx test-open-order-report-live.ts",
+    "test:safety": "tsx test-safety.ts",
+    "test:eval": "tsx test-eval.ts",
+    "test:backtest": "tsx test-backtest.ts",
+    "test:analytics": "tsx test-analytics.ts",
+    "deploy": "serverless deploy",
+    "remove": "serverless remove"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@aws-sdk/client-dynamodb": "^3.1068.0",
+    "@aws-sdk/client-s3": "^3.658.0",
+    "@aws-sdk/client-ses": "^3.658.0",
+    "@aws-sdk/client-sqs": "^3.658.0",
+    "@aws-sdk/client-ssm": "^3.1068.0",
+    "@aws-sdk/lib-dynamodb": "^3.1068.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.155",
+    "serverless": "^3.39.0",
+    "serverless-esbuild": "^1.53.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3"
+  }
+}

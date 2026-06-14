@@ -1,0 +1,10 @@
+node_modules*
+.env
+.serverless
+dist*
+
+# Verification harness output
+reports/
+
+.DS_Store
+*.log

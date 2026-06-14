@@ -97,6 +97,25 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `specs/007-role-scoped-tools.md` | Role-based tool access + purchasing/sales scoped Fulcrum tools |
 | `specs/008-chat-debugging-logs.md` | chatId-tagged logs, CloudWatch durability, and the agent's log-search tool |
 | `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + Voyage); webhook + reconcile ingestion; semantic search tool |
+| `specs/010-customer-service-ticket-agent.md` | The `ticket-agent/` subsystem: agent-first Zendesk ticket classification, drafting, and the deterministic PO pipeline (moved from CSDroid) |
+
+## ticket-agent/ (Zendesk customer-service subsystem)
+
+Self-contained **TypeScript** subproject (own `package.json`, `tsconfig.json`,
+`serverless.yml`) — relocated from the former `CSDroid` repo. Deploys as its own
+Serverless/Lambda stack; independent of the root JS chat server. It keeps its own
+internal docs (`ticket-agent/SPECS/`, `AGENTS.md`, `LEARNINGS.md`), so only the
+top-level shape is listed here.
+
+| Path | Description |
+|---|---|
+| `ticket-agent/README.md` | Subsystem overview, commands, env, deploy |
+| `ticket-agent/src/agent/` | The Claude tool-use agent: loop, orchestrator, system prompt, tools, learnings |
+| `ticket-agent/src/handler.ts` | SQS ingest + worker entrypoints (Serverless) |
+| `ticket-agent/src/` (rest) | Deterministic PO pipeline + Zendesk/Fulcrum/S3 data layer + taxonomy/authorization/pricing/lead-time |
+| `ticket-agent/SPECS/customer-service-agent.md` | Detailed design spec for the agent |
+| `ticket-agent/test-*.ts`, `fixtures/` | Verification harness (safety/eval/backtest/analytics) + golden set |
+| `ticket-agent/serverless.yml` | Independent Lambda stack (`ingest` HTTP + `worker` SQS) |
 
 ## Tests
 
