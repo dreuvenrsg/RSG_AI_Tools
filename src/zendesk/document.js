@@ -19,6 +19,35 @@ function byId(list, id) {
   return (list || []).find((x) => x && x.id === id) || {};
 }
 
+const NAMED_ENTITIES = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+/** Decode the HTML entities Zendesk leaves in comment bodies (&nbsp;, &amp;, &#39;, …). */
+function decodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, e) => {
+    if (e[0] === "#") {
+      const code = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    }
+    return NAMED_ENTITIES[e] ?? m;
+  });
+}
+
+/**
+ * Clean a Zendesk comment body for embedding/display: decode HTML entities,
+ * strip any stray tags (some bodies arrive as HTML), and collapse the runaway
+ * whitespace/blank lines Zendesk's plain_body carries. Pure + exported for tests.
+ */
+export function cleanText(s) {
+  // Strip real HTML tags FIRST (on the raw string), THEN decode entities — so a
+  // literal, entity-encoded "&lt;tag&gt;" survives as text instead of being
+  // mistaken for a tag and removed.
+  return decodeEntities(String(s || "").replace(/<[^>]+>/g, " "))
+    .replace(/[ \t ]+/g, " ") // collapse runs of spaces (incl. nbsp char)
+    .replace(/ *\n */g, "\n") // trim around newlines
+    .replace(/\n{3,}/g, "\n\n") // collapse 3+ blank lines to one
+    .trim();
+}
+
 /**
  * Normalize a raw Zendesk bundle into the flat meta we index + store.
  * bundle = { ticket, users, groups, organizations, comments, incidentIds, subdomain }
@@ -42,7 +71,7 @@ export function normalizeTicket(bundle = {}) {
     author: byId(users, c.author_id).name || `user ${c.author_id}`,
     public: c.public !== false,
     createdAt: c.created_at || null,
-    body: (c.plain_body || c.body || "").trim(),
+    body: cleanText(c.plain_body || c.body),
   }));
 
   return {

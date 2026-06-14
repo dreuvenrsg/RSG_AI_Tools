@@ -5,6 +5,7 @@ import {
   normalizeTicket,
   buildHeader,
   chunkDocument,
+  cleanText,
   DEFAULT_CHUNK_CHARS,
 } from "../src/zendesk/document.js";
 import { verifyZendeskSignature, computeSignature } from "../src/zendesk/webhookAuth.js";
@@ -74,6 +75,28 @@ test("normalizeTicket tolerates missing sideloads and bodies", () => {
   assert.deepEqual(m.tags, []);
   assert.deepEqual(m.comments, []);
   assert.equal(m.followupSourceId, null);
+});
+
+// ---------- text cleaning ----------
+
+test("cleanText decodes entities, strips tags, and collapses whitespace", () => {
+  // Mirrors the real Zendesk plain_body noise (&nbsp;, runaway newlines).
+  assert.equal(cleanText("Hello good morning, \n &nbsp; \n Can you help&nbsp;with status"), "Hello good morning,\n\nCan you help with status");
+  assert.equal(cleanText("A&amp;B &lt;tag&gt; &#39;q&#39;"), "A&B <tag> 'q'");
+  assert.equal(cleanText("<p>Hi <b>there</b></p>"), "Hi there");
+  assert.equal(cleanText("line1\n\n\n\n\nline2"), "line1\n\nline2");
+  assert.equal(cleanText(null), "");
+  assert.equal(cleanText("&unknownentity; stays"), "&unknownentity; stays");
+});
+
+test("normalizeTicket cleans comment bodies", () => {
+  const m = normalizeTicket(
+    sampleBundle({
+      comments: [{ author_id: 1, public: true, created_at: "2026-01-02T10:00:00Z", plain_body: "Need&nbsp;status&nbsp;please. \n &nbsp; \n Thanks" }],
+    })
+  );
+  assert.equal(m.comments[0].body, "Need status please.\n\nThanks");
+  assert.ok(!buildHeader(m).includes("&nbsp;"));
 });
 
 // ---------- header ----------
