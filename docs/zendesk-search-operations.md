@@ -104,8 +104,11 @@ select cursor_seconds from zendesk_sync_state;        -- reconcile cursor
 1. Zendesk: deactivate/delete trigger `52578245738131`, then delete webhook
    `01KV267BCJPYC111T7DX60CZQJ`.
 2. DB: `drop table zendesk_ticket_chunks, zendesk_embedding_cache, zendesk_sync_state;`
-3. SSM: delete `openai-api-key`, `zendesk-webhook-secret` (keep `database-url`,
-   `zendesk-token`, `zendesk-email` — shared with RSG_Website).
+3. SSM: delete `openai-api-key`, `zendesk-webhook-secret`. The `database-url`,
+   `zendesk-token`, `zendesk-email` SSM params are *copies* of RSG_Website's
+   Vercel env values (the website reads its own env, not SSM) — deleting the SSM
+   copies doesn't affect the website, but there's no need to unless you're also
+   retiring the backend.
 4. Code: remove `zendesk_ticket_search` from `src/tools/index.js` +
    `src/server/permissions.js`, the webhook route + reconcile loop in
    `src/server/index.js`, `ctx.zendesk` wiring, and `src/zendesk/`; redeploy.
@@ -117,6 +120,13 @@ select cursor_seconds from zendesk_sync_state;        -- reconcile cursor
 - `pg.Pool` would crash the process on a dropped idle connection (Neon
   autosuspend/restart); `store.getPool` installs a pool `error` handler so it
   recovers. Don't remove it.
+- **Shared credentials (drift risk).** `database-url`, `zendesk-token`,
+  `zendesk-email` in SSM are *copies* of RSG_Website's Vercel env vars — the
+  same Neon DB and the same Zendesk API token power both apps, but each app
+  reads its own store (website → Vercel env via `lib/db/index.ts` and
+  `app/api/tickets|zendesk/*`; this backend → SSM). So **rotating the Zendesk
+  token or changing the Neon connection string must be done in BOTH places**, or
+  one side silently breaks. There is no auto-sync.
 - The backfill shares Zendesk's account-wide API rate limit with the **live
   ticket-agent (PO processing)** — high concurrency can cause mutual 429s
   (both retry/back off). The reconcile walk skips unchanged tickets without
