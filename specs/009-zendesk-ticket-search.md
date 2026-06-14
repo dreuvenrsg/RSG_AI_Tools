@@ -25,8 +25,8 @@ with deep links. Constraints called out:
   already shared with the agent via `rsg_ai_conversation`); RSG_AI_Tools owns its
   `zendesk_*` tables via `src/zendesk/schema.sql` so the website's Drizzle schema
   never clashes. Connection string is `DATABASE_URL` (SSM `/rsg-ai/prod/database-url`).
-- **Embeddings: Voyage AI** (`voyage-3-large`, 1024-dim) over `fetch` — the
-  Anthropic SDK has no embeddings endpoint. Key in SSM `/rsg-ai/prod/voyage-api-key`.
+- **Embeddings: OpenAI** (`text-embedding-3-small`, 1536-dim) over `fetch` — keeps
+  parity with the PlanFinder pattern. Key in SSM `/rsg-ai/prod/openai-api-key` (or OPENAI_API_KEY env).
 - **Dedup/versioning.** Unit of indexing is one ticket → N chunks with
   deterministic ids `{ticketId}:{chunkIndex}`. `store.replaceTicket` deletes all
   of a ticket's rows and re-inserts the current set in one transaction, so exactly
@@ -51,7 +51,7 @@ with deep links. Constraints called out:
 
 ## Tasks
 
-- [x] `src/zendesk/`: client, embeddings (Voyage), document (pure), store (pg +
+- [x] `src/zendesk/`: client, embeddings (OpenAI), document (pure), store (pg +
       pgvector), indexer (indexTicket + runReconcile), search facade, schema.sql,
       webhookAuth (HMAC), migrate + backfill scripts; `src/lib/ssm.js` helper
 - [x] `zendesk_ticket_search` tool + register in `src/tools/index.js`
@@ -75,7 +75,7 @@ End-to-end (requires live secrets, to run during rollout):
 - `DATABASE_URL=… npm run zendesk:migrate` → extension + HNSW index present.
 - `npm run zendesk:backfill` over a slice → rows with non-null embeddings; cache populated.
 - Re-index a ticket after adding a comment → `store.countChunks` reflects only the
-  current set, `updated_at` advanced, no stale rows; Voyage called only for the
+  current set, `updated_at` advanced, no stale rows; OpenAI called only for the
   changed chunk.
 - POST a signed sample payload to `/api/zendesk/webhook` → ticket re-indexed;
   bad/absent signature → 401.

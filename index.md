@@ -38,7 +38,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `src/qbo/client.js` | Read-focused QBO API client; SSM-backed OAuth with refresh-token rotation shared with the Lambda |
 | `src/fulcrum/client.js` | Read-only Fulcrum Pro API client (GET + POST `.../list` only — mutations refused in code); key from env/SSM |
 | `src/zendesk/client.js` | Zendesk API client (Basic auth, env/SSM); ticket-bundle fetch (sideloaded users/groups/orgs + comments + incidents) and incremental export |
-| `src/zendesk/embeddings.js` | Voyage AI embeddings client (`voyage-3-large`, 1024-dim) over fetch; document/query input types |
+| `src/zendesk/embeddings.js` | OpenAI embeddings client (`text-embedding-3-small`, 1536-dim) over fetch |
 | `src/zendesk/document.js` | **Pure**: normalize a Zendesk bundle → meta; build the structured header + thread; deterministic chunking |
 | `src/zendesk/store.js` | Postgres + pgvector store: `replaceTicket` (transactional delete+insert + cache), cosine `search`, embedding cache, sync cursor |
 | `src/zendesk/indexer.js` | Orchestration: `indexTicket` (fetch→build→embed-with-cache→replace) and `runReconcile` (incremental export loop) |
@@ -49,7 +49,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `src/zendesk/backfill.js` | Initial/catch-up backfill via incremental export (`npm run zendesk:backfill`) |
 | `src/lib/allocation.js` | Pure money math: integer-cent largest-remainder allocation, weight strategies |
 | `src/lib/csv.js` | Minimal RFC-4180 CSV serializer |
-| `src/lib/ssm.js` | Shared secret loader: env override → SSM SecureString (used by qbo/fulcrum/zendesk/voyage) |
+| `src/lib/ssm.js` | Shared secret loader: env override → SSM SecureString (used by qbo/fulcrum/zendesk/openai) |
 | `src/tools/index.js` | Tool registry — every agent capability registers here as `{ definition, run }` |
 | `src/tools/accounting/landedCost.js` | `qbo_landed_cost_report`: per-part spend with freight/tariff/fee/tax allocation |
 | `src/tools/accounting/cashApplication.js` | `qbo_cash_application_lookup`: how customer payments were applied to AR invoices |
@@ -96,7 +96,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `specs/006-file-uploads.md` | Upload normalization: images/PDF/text/Excel |
 | `specs/007-role-scoped-tools.md` | Role-based tool access + purchasing/sales scoped Fulcrum tools |
 | `specs/008-chat-debugging-logs.md` | chatId-tagged logs, CloudWatch durability, and the agent's log-search tool |
-| `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + Voyage); webhook + reconcile ingestion; semantic search tool |
+| `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + OpenAI); webhook + reconcile ingestion; semantic search tool |
 | `specs/010-customer-service-ticket-agent.md` | The `ticket-agent/` subsystem: agent-first Zendesk ticket classification, drafting, and the deterministic PO pipeline (moved from CSDroid) |
 
 ## ticket-agent/ (Zendesk customer-service subsystem)

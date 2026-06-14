@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Initial / catch-up backfill: walk the Incremental Ticket Export and index
 // every changed ticket since a start time, advancing the stored cursor.
-//   DATABASE_URL=... ZENDESK_TOKEN=... VOYAGE_API_KEY=... \
+//   DATABASE_URL=... ZENDESK_TOKEN=... OPENAI_API_KEY=... \
 //     node src/zendesk/backfill.js [sinceUnixSeconds]
 //   npm run zendesk:backfill            # full backfill from epoch
 //
 // With no argument it starts from 0 (the whole ticket history). Pass a Unix
 // timestamp to start later, or set ZENDESK_BACKFILL_MAX to bound the run.
 import { ZendeskClient } from "./client.js";
-import { VoyageClient } from "./embeddings.js";
+import { EmbeddingsClient } from "./embeddings.js";
 import { runReconcile } from "./indexer.js";
 import { getPool } from "./store.js";
 
@@ -17,11 +17,11 @@ async function main() {
   const since = arg != null ? Number(arg) : 0;
   const maxTickets = Number(process.env.ZENDESK_BACKFILL_MAX || 100000);
 
-  const [zendesk, voyage] = await Promise.all([ZendeskClient.create(), VoyageClient.create()]);
+  const [zendesk, embeddings] = await Promise.all([ZendeskClient.create(), EmbeddingsClient.create()]);
   console.error(`[zendesk] backfilling from ${since} (max ${maxTickets} tickets)...`);
   const result = await runReconcile({
     zendesk,
-    voyage,
+    embeddings,
     since,
     maxTickets,
     onProgress: (p) =>

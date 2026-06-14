@@ -38,7 +38,7 @@ reports itself unavailable and the rest of the agent is unaffected.
 | Env var | SSM fallback | Meaning |
 |---|---|---|
 | `DATABASE_URL` | `/rsg-ai/prod/database-url` | Postgres/pgvector (RSG_Website's Vercel/Neon DB) |
-| `VOYAGE_API_KEY` | `/rsg-ai/prod/voyage-api-key` | Voyage embeddings key (`voyage-3-large`, 1024-dim) |
+| `OPENAI_API_KEY` | `/rsg-ai/prod/openai-api-key` | OpenAI embeddings key (`text-embedding-3-small`, 1536-dim) |
 | `ZENDESK_TOKEN` / `ZENDESK_EMAIL` | `/rsg-ai/prod/zendesk-token`, `.../zendesk-email` | Zendesk API Basic auth (subdomain `rsgsecurity`) |
 | `ZENDESK_WEBHOOK_SECRET` | `/rsg-ai/prod/zendesk-webhook-secret` | HMAC secret for `/api/zendesk/webhook` |
 | `ZENDESK_RECONCILE_MINUTES` | — | Reconcile interval (default 15); `ZENDESK_SYNC_ENABLED=false` disables the timer |
@@ -182,7 +182,7 @@ key from SSM `/rsg-ai/prod/fulcrum-api-key` or `FULCRUM_API_KEY` env)
 - `fulcrum_api_request` — the unrestricted explorer (admins only).
 
 **zendesk/** (semantic search over vectorized tickets — Postgres/pgvector +
-Voyage embeddings; see `src/zendesk/` and spec 009)
+OpenAI embeddings; see `src/zendesk/` and spec 009)
 - `zendesk_ticket_search` — natural-language search over ticket history (full
   thread incl. internal notes, tags, status, requester, linked tickets), with
   optional status/tags/date/requester filters. Returns cited Zendesk deep links

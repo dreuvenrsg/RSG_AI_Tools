@@ -6,7 +6,7 @@
 //      embedded *and* every chunk stays self-describing after retrieval.
 //
 // No I/O, no pg, no network — so this is unit-testable and importable without
-// standing up the database. The indexer feeds these chunks to Voyage + Postgres.
+// standing up the database. The indexer feeds these chunks to OpenAI + Postgres.
 
 // Aim each chunk at a few thousand chars of thread so retrieval stays focused;
 // the header is repeated on every chunk and doesn't count against this budget.

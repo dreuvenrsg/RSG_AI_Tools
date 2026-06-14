@@ -19,7 +19,7 @@ export function sha256(text) {
  * fires are no-ops); pass force:true to rebuild regardless.
  * @returns {{ ticketId, chunks, embedded, cached, skipped }}
  */
-export async function indexTicket(id, { zendesk, voyage, force = false } = {}) {
+export async function indexTicket(id, { zendesk, embeddings, force = false } = {}) {
   const bundle = await zendesk.getTicketBundle(id);
   const meta = normalizeTicket(bundle);
 
@@ -34,11 +34,11 @@ export async function indexTicket(id, { zendesk, voyage, force = false } = {}) {
   const cached = await store.getCachedEmbeddings(chunks.map((c) => c.sha));
   const misses = chunks.filter((c) => !cached.has(c.sha));
   if (misses.length) {
-    const vectors = await voyage.embedDocuments(misses.map((c) => c.text));
+    const vectors = await embeddings.embedDocuments(misses.map((c) => c.text));
     misses.forEach((c, i) => cached.set(c.sha, vectors[i]));
   }
   const withEmbeddings = chunks.map((c) => ({ ...c, embedding: cached.get(c.sha) }));
-  await store.replaceTicket(meta, withEmbeddings, { model: voyage.model });
+  await store.replaceTicket(meta, withEmbeddings, { model: embeddings.model });
 
   return { ticketId: meta.id, chunks: chunks.length, embedded: misses.length, cached: chunks.length - misses.length, skipped: false };
 }
@@ -48,7 +48,7 @@ export async function indexTicket(id, { zendesk, voyage, force = false } = {}) {
  * indexing each changed ticket and advancing the cursor by end_time. Bounded by
  * maxTickets to keep a single run sane.
  */
-export async function runReconcile({ zendesk, voyage, since = null, maxTickets = 5000, onProgress = () => {} } = {}) {
+export async function runReconcile({ zendesk, embeddings, since = null, maxTickets = 5000, onProgress = () => {} } = {}) {
   let cursor = since != null ? Math.floor(since) : await store.getCursor();
   if (cursor == null) cursor = Math.floor(Date.now() / 1000) - 30 * 24 * 3600; // first run: last 30 days
   let processed = 0;
@@ -58,7 +58,7 @@ export async function runReconcile({ zendesk, voyage, since = null, maxTickets =
     const { tickets, endTime, hasMore } = await zendesk.incrementalTickets(cursor);
     for (const t of tickets) {
       try {
-        const r = await indexTicket(t.id, { zendesk, voyage });
+        const r = await indexTicket(t.id, { zendesk, embeddings });
         onProgress({ ticketId: t.id, ...r });
       } catch (err) {
         onProgress({ ticketId: t.id, error: err.message });

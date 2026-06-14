@@ -1,5 +1,5 @@
 // Shared SSM secret loader: env override → SSM Parameter Store (decrypted).
-// Several domains (qbo, fulcrum, zendesk, voyage) need the same "prefer the env
+// Several domains (qbo, fulcrum, zendesk, openai) need the same "prefer the env
 // var, otherwise read SecureString from SSM" behavior; this centralizes it so
 // new integrations don't re-implement the SSM plumbing. No secret is ever
 // hardcoded — callers pass the SSM parameter name and the env var that overrides it.
@@ -12,7 +12,7 @@ function client() {
 }
 
 /**
- * @param {string} paramName  SSM parameter, e.g. "/rsg-ai/prod/voyage-api-key"
+ * @param {string} paramName  SSM parameter, e.g. "/rsg-ai/prod/openai-api-key"
  * @param {{ env?: string }} [opts]  env var name that, if set, wins over SSM
  */
 export async function loadSecret(paramName, { env } = {}) {

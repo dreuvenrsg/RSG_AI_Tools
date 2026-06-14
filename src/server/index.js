@@ -12,7 +12,7 @@ import { QboClient } from "../qbo/client.js";
 import { FulcrumClient } from "../fulcrum/client.js";
 import { ZendeskSearch } from "../zendesk/search.js";
 import { ZendeskClient } from "../zendesk/client.js";
-import { VoyageClient } from "../zendesk/embeddings.js";
+import { EmbeddingsClient } from "../zendesk/embeddings.js";
 import { indexTicket, runReconcile } from "../zendesk/indexer.js";
 import { verifyZendeskSignature, SIGNATURE_HEADER, TIMESTAMP_HEADER } from "../zendesk/webhookAuth.js";
 import { loadSecret } from "../lib/ssm.js";
@@ -87,7 +87,7 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
     fulcrumPromise = null;
     throw err;
   }));
-  // Zendesk search is optional infra (needs DATABASE_URL + Voyage). Resolve to
+  // Zendesk search is optional infra (needs DATABASE_URL + OpenAI). Resolve to
   // null on failure so the rest of the agent still works without it; the tool
   // surfaces a clear message when null.
   let zendeskPromise = null;
@@ -96,10 +96,10 @@ export function createServer({ apiKey = process.env.RSG_AI_API_KEY, corsOrigin =
     console.warn("[rsg-ai] Zendesk search unavailable:", err.message);
     return null;
   }));
-  // Indexing deps (Zendesk API + Voyage) + webhook secret, for the webhook route.
+  // Indexing deps (Zendesk API + OpenAI) + webhook secret, for the webhook route.
   let indexerPromise = null;
-  const getZendeskIndexer = () => (indexerPromise ??= Promise.all([ZendeskClient.create(), VoyageClient.create()])
-    .then(([zendesk, voyage]) => ({ zendesk, voyage }))
+  const getZendeskIndexer = () => (indexerPromise ??= Promise.all([ZendeskClient.create(), EmbeddingsClient.create()])
+    .then(([zendesk, embeddings]) => ({ zendesk, embeddings }))
     .catch((err) => { indexerPromise = null; throw err; }));
   let webhookSecretPromise = null;
   const getWebhookSecret = () => (webhookSecretPromise ??= loadSecret(ZENDESK_WEBHOOK_SECRET_PARAM, { env: "ZENDESK_WEBHOOK_SECRET" })
@@ -275,8 +275,8 @@ export function startReconcileLoop({ minutes = Number(process.env.ZENDESK_RECONC
     if (running) return;
     running = true;
     try {
-      const [zendesk, voyage] = await Promise.all([ZendeskClient.create(), VoyageClient.create()]);
-      const r = await runReconcile({ zendesk, voyage, maxTickets: Number(process.env.ZENDESK_RECONCILE_MAX) || 500 });
+      const [zendesk, embeddings] = await Promise.all([ZendeskClient.create(), EmbeddingsClient.create()]);
+      const r = await runReconcile({ zendesk, embeddings, maxTickets: Number(process.env.ZENDESK_RECONCILE_MAX) || 500 });
       console.log(`[zendesk] reconcile: ${JSON.stringify(r)}`);
     } catch (err) {
       console.warn("[zendesk] reconcile skipped:", err.message);

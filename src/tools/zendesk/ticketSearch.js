@@ -35,7 +35,7 @@ export const definition = {
 };
 
 export async function run(input, { zendesk }) {
-  if (!zendesk) throw new Error("Zendesk search is unavailable (no DATABASE_URL / Voyage key configured).");
+  if (!zendesk) throw new Error("Zendesk search is unavailable (no DATABASE_URL / OpenAI key configured).");
   return zendesk.search(input || {});
 }
 

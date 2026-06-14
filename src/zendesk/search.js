@@ -1,26 +1,26 @@
 // Query-time facade wired into the agent ctx as `ctx.zendesk`. Embeds the user's
-// query with Voyage and runs the pgvector search, returning ticket-level hits
+// query with OpenAI and runs the pgvector search, returning ticket-level hits
 // (best chunk per ticket) with deep links and linked-ticket references for the
 // agent to cite. Mirrors how QboClient/FulcrumClient are created and passed in ctx.
-import { VoyageClient } from "./embeddings.js";
+import { EmbeddingsClient } from "./embeddings.js";
 import * as store from "./store.js";
 
 const MAX_LIMIT = 25;
 const SNIPPET_CHARS = 600;
 
 export class ZendeskSearch {
-  constructor(voyage) {
-    this.voyage = voyage;
+  constructor(embeddings) {
+    this.embeddings = embeddings;
   }
 
   static async create() {
-    return new ZendeskSearch(await VoyageClient.create());
+    return new ZendeskSearch(await EmbeddingsClient.create());
   }
 
   async search({ query, status, tags, date_from, date_to, requester, limit } = {}) {
     if (!query || !String(query).trim()) throw new Error("query is required");
     const k = Math.min(Math.max(Number(limit) || 8, 1), MAX_LIMIT);
-    const queryEmbedding = await this.voyage.embedQuery(String(query));
+    const queryEmbedding = await this.embeddings.embedQuery(String(query));
     const rows = await store.search(
       queryEmbedding,
       {

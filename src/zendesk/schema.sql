@@ -3,8 +3,9 @@
 -- RSG_AI_Tools manages them with this file; the website's Drizzle schema never
 -- touches the zendesk_* tables, so the two repos don't clash.
 --
--- NOTE: vector(1024) must match VOYAGE_DIM in embeddings.js. Changing the
--- embedding dimension requires altering the column + rebuilding the index.
+-- NOTE: vector(1536) must match EMBED_DIM in embeddings.js (OpenAI
+-- text-embedding-3-small = 1536). Changing the embedding dimension requires
+-- altering the column + rebuilding the index.
 
 create extension if not exists vector;
 
@@ -35,7 +36,7 @@ create table if not exists zendesk_ticket_chunks (
   incident_ids       bigint[] not null default '{}',
   text_content       text not null,
   text_sha256        text not null,
-  embedding          vector(1024),
+  embedding          vector(1536),
   indexed_at         timestamptz not null default now()
 );
 
@@ -50,7 +51,7 @@ create index if not exists idx_zendesk_chunks_updated   on zendesk_ticket_chunks
 -- here for free. Survives row replacement (never deleted by replaceTicket).
 create table if not exists zendesk_embedding_cache (
   text_sha256 text primary key,
-  embedding   vector(1024) not null,
+  embedding   vector(1536) not null,
   model       text not null,
   created_at  timestamptz not null default now()
 );
