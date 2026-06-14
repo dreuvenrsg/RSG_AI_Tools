@@ -46,7 +46,8 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `src/zendesk/webhookAuth.js` | **Pure** Zendesk webhook HMAC-SHA256 signature verification |
 | `src/zendesk/schema.sql` | pgvector DDL: `zendesk_ticket_chunks`, `zendesk_embedding_cache`, `zendesk_sync_state` (owned here, lives in RSG_Website's Postgres) |
 | `src/zendesk/migrate.js` | Applies `schema.sql` (`npm run zendesk:migrate`) |
-| `src/zendesk/backfill.js` | Initial/catch-up backfill via incremental export (`npm run zendesk:backfill`) |
+| `src/zendesk/backfill.js` | Initial/catch-up backfill via incremental export (`npm run zendesk:backfill`); bounded concurrency |
+| `src/zendesk/reindex.js` | Re-index specific tickets by id (args or stdin) — fills gaps without a full re-scan; forces refresh |
 | `src/lib/allocation.js` | Pure money math: integer-cent largest-remainder allocation, weight strategies |
 | `src/lib/csv.js` | Minimal RFC-4180 CSV serializer |
 | `src/lib/ssm.js` | Shared secret loader: env override → SSM SecureString (used by qbo/fulcrum/zendesk/openai) |
