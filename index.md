@@ -88,6 +88,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 |---|---|
 | `docs/rsg-ai-api.md` | **The contract** between this backend and the RSG_Website chat UI: endpoints, SSE events, uploads, logging, deployment |
 | `docs/website-integration-handoff.md` | Handoff brief for the Claude session building the website integration |
+| `docs/zendesk-search-operations.md` | **Ops runbook** for Zendesk search: every external resource (SSM params, webhook/trigger ids, Neon tables), commands, change/teardown steps |
 | `specs/README.md` | Spec conventions (status, task checkboxes, follow-ups) |
 | `specs/001-accounting-tools.md` | QBO landed cost + cash application tools |
 | `specs/002-rsg-ai-agent-api.md` | Agent loop, SSE API, audit logging |

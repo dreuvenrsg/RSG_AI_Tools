@@ -83,6 +83,26 @@ End-to-end (requires live secrets, to run during rollout):
   tickets, similarity order, working `agent/tickets/{id}` links, linked refs.
 - Chat as an admin role → cited answer; tool hidden from invalid roles.
 
+## Operational state (deployed)
+
+Live as of 2026-06-14. Full inventory + runbook (SSM params, webhook/trigger
+ids, Neon details, change/teardown steps) is in
+**`docs/zendesk-search-operations.md`** — keep it current when resources change.
+
+- Embeddings: **OpenAI `text-embedding-3-small`, 1536 dims** (swapped from the
+  originally-planned Voyage; key already provisioned for RSG's AI work).
+- Storage: **RSG_Website's Neon DB** (shared). Hit the free-tier **512 MB** cap
+  during the first full-12-month backfill; plan upgraded (storage cap lifted,
+  ~64 GB RAM compute). Footprint ~413 MB @ 12 months; full history ≈ ~1 GB.
+- Indexing live: webhook `01KV267BCJPYC111T7DX60CZQJ` + trigger `52578245738131`
+  (create/update → `/api/zendesk/webhook`), plus the in-server reconcile timer.
+- Hardening shipped during rollout: `pg.Pool` idle-error handler (Neon restarts
+  no longer crash the server); reconcile skips unchanged tickets without a
+  per-ticket fetch (gentler on the shared Zendesk rate limit); `reindex.js` for
+  targeted gap-fills.
+- Backfill: 12 months done (~20k tickets); full ~34k history via
+  `npm run zendesk:backfill 0`.
+
 ## Follow-ups
 
 - [ ] Website could read `zendesk_ticket_chunks` directly to add semantic search
