@@ -27,6 +27,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 |---|---|
 | `V2_emailSender.js` | Lambda handler/orchestrator: QBO OAuth, invoice fetching, shipping validation via Fulcrum, customer routing rules, SES summary emails, DynamoDB run lock, monthly mis-route audit |
 | `fulcrumProcessor.js` | Puppeteer browser automation: logs into Fulcrum, processes "NEEDS ACTION" invoices |
+| `fulcrumInvoiceApi.js` | Fulcrum invoicing via the app HTTP API (specs/013): fetch + classify the Needs Action list (reuses `shouldProcessRow` for skip parity); discovery half of the browser→API migration |
 | `layers/chromium/nodejs/package.json` | Chromium Lambda-layer manifest |
 
 ## Accounting tools + RSG AI agent (`src/`)

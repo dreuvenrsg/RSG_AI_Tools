@@ -39,11 +39,24 @@ GET /api/Invoices/GetInvoiceGridDataQuery
 ```
 One authenticated GET returned the entire backlog (99 rows). Each row already
 carries the fields the scraper computes by hand:
-- `invoice` — **null ⇒ needs Create**; an object with `invoiceStatus:"Unissued"`
-  ⇒ needs Issue
-- `hasRefund` (bool), `salesOrderBalance`, `invoiceTotal` (numbers)
+- `invoice` — **null ⇒ Create row**; an object ⇒ an invoice exists (Issue row).
+  `invoiceStatus` is "New" for all Needs Action rows, so it does NOT distinguish
+  create/issue — key off `invoice` presence (matches the DOM's action button).
+- `hasRefund` (bool), `salesOrderBalance`, **`invoiceTotalV2`** (numbers)
+- **Total field gotcha (verified by matching DOM cells to API fields):** the
+  grid's "invoice-total" column binds to **`invoiceTotalV2`**, NOT `invoiceTotal`.
+  For a create row V2 == the full amount; for an already-created invoice V2 == 0
+  (nothing pending) — which is exactly why the scrape skips those. Using
+  `invoiceTotal` instead caused 6 false "issue" classifications. The DOM also
+  strips accounting parens (negatives shown positive), so we read `abs(V2)`.
 - `id` (invoice id), `salesOrder.{id,name}`, `customerSummary`, `shippingStatus`
 - KPI: `GET /api/Invoices/GetUnpaidInvoiceKPIDataQuery/GetUnpaidInvoiceKPIQuery?CustomerId=`
+
+**Skip parity confirmed (Phase 1):** `fulcrumInvoiceApi.js` fetches the list and
+classifies each row via the SAME `shouldProcessRow` the browser uses. A live
+check classified **99/99 rows identically** to a DOM scrape of the same moment
+(49 create, 0 issue, 50 skip = 39 refund + 6 issue-zero-total + 5 create-zero) —
+0 mismatches.
 
 **Writes — partially observed, NOT yet confirmed:**
 - During an Issue, the only state-changing call seen was
@@ -85,8 +98,13 @@ Lambda with no Chromium).
 - [ ] Phase 0: capture + document the Create mutation (endpoint, method, payload).
 - [ ] Phase 0: confirm the Issue trigger and that it emails + QBO-syncs identically.
 - [ ] Phase 0: test whether `api.fulcrumpro.com` (Bearer key) supports create/issue.
-- [ ] Phase 1: list discovery via `GetInvoiceGridDataQuery` (paged), mapped to the
-      existing `shouldProcessRow` inputs; feed the current click-issuer.
+- [x] Phase 1a: `fulcrumInvoiceApi.js` — fetch the Needs Action list via
+      `GetInvoiceGridDataQuery` (paged), normalize + classify reusing
+      `shouldProcessRow`; pure functions unit-tested; **99/99 live skip parity**
+      vs the DOM scrape (refunds + zero values + create/issue all match).
+- [ ] Phase 1b: wire the API plan into the run (behind a flag) to drive the
+      existing click-issuer via `findRowBySoNumber`, replacing the DOM
+      discovery/pagination walk.
 - [ ] Phase 2: direct create/issue behind `FULCRUM_API_MODE`, dry-run + supervised
       single-invoice verify, then batch with rate limiting; browser path as fallback.
 - [ ] Extend the UI/health-alert idea to the API (loud alert on unexpected
