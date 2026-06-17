@@ -411,7 +411,12 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
   const subjectPrefix = uiRegression ? '⚠️ FULCRUM UI REGRESSION — ' : '';
   const subject = `${subjectPrefix}Invoice Run Summary on ${dateStr} - ${results.sent} sent, ${actionItemCount} need attention [${formatMinutes(metrics.totalTime)}]`;
 
-  const processedSoNumbers = (fulcrumResults?.processedInvoices || []).map(inv => `SO${inv.soNumber}`);
+  // soNumber is already stored with its "SO" prefix (e.g. "SO9475") by both the
+  // browser and API paths, so don't add another — guard against double-prefix.
+  const processedSoNumbers = (fulcrumResults?.processedInvoices || []).map(inv => {
+    const so = String(inv.soNumber ?? '').trim();
+    return /^so/i.test(so) ? so : `SO${so}`;
+  });
   const sentDetails = details.filter(d => d.status === 'sent');
 
   const emailContext = {
@@ -2087,6 +2092,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       }
 
       console.log('\n📧 Running QBO processor...\n');
+      await waitForFulcrumQboSync(fulcrumResults);
       const qboResults = await app.run();
 
       logger.startStage('email');
@@ -2252,6 +2258,19 @@ async function getFulcrumApiKey() {
   if (process.env.FULCRUM_API_KEY) return process.env.FULCRUM_API_KEY;
   const res = await ssmClient.send(new GetParameterCommand({ Name: '/rsg-ai/prod/fulcrum-api-key', WithDecryption: true }));
   return res.Parameter.Value;
+}
+
+// After the Fulcrum stage issues invoices, the Fulcrum→QBO sync is async — a
+// just-issued invoice isn't immediately visible to the QBO send stage's
+// "unsent unpaid" query, so it would slip to the next run. Give the sync a short
+// window to register before the QBO stage runs. Skipped when nothing was issued.
+// Override the delay with FULCRUM_QBO_SYNC_WAIT_MS (default 20000).
+async function waitForFulcrumQboSync(fulcrumResults) {
+  const issued = fulcrumResults?.processedInvoices?.length || 0;
+  if (issued <= 0) return;
+  const ms = parsePositiveIntegerOption(process.env.FULCRUM_QBO_SYNC_WAIT_MS, 20000);
+  console.log(`[Sync] Waiting ${Math.round(ms / 1000)}s for Fulcrum→QBO sync of ${issued} issued invoice(s) before QBO send...`);
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Run the Fulcrum stage via either the proven browser-click path (default) or
@@ -2630,7 +2649,8 @@ export const handler = async (event, context) => {
     // STAGE 2: QBO PROCESSING
     // =====================================
     console.log('\n📧 Stage 2: QBO Invoice Sending\n');
-    
+
+    await waitForFulcrumQboSync(fulcrumResults);
     qboResults = await app.run();
     
     console.log(`\n[QBO] Completed - ${qboResults.sent} sent, ${qboResults.errors} errors\n`);

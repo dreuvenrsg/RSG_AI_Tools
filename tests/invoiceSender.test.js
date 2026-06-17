@@ -555,3 +555,20 @@ test('shouldProcessRow: a row with no action button is skipped, never throws (re
   assert.doesNotThrow(() => { result = shouldProcessRow(0, 36529.6, false, false, false); });
   assert.equal(result, false);
 });
+
+test('summary email does not double-prefix Processed SOs (no "SOSO")', () => {
+  const results = { processed: 0, sent: 0, skipped: 0, errors: 0, details: [] };
+  const fulcrumResults = {
+    processedInvoices: [
+      { soNumber: 'SO9475', action: 'Created & Issued' }, // already prefixed (real shape)
+      { soNumber: '9476', action: 'Issued' },             // bare digits should still get one SO
+    ],
+    errors: [], stoppedEarly: false, stopReason: null,
+  };
+  const { body } = buildSummaryEmailContent(results, fulcrumResults, {
+    now: new Date('2026-06-17T00:00:00Z'), environmentLabel: 'PRODUCTION',
+  });
+  assert.doesNotMatch(body, /SOSO/);
+  assert.match(body, /SO9475/);
+  assert.match(body, /SO9476/);
+});
