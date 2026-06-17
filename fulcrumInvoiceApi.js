@@ -10,7 +10,7 @@
 // Writes (actually create/issue via API) are a later, supervised phase; this
 // module only reads + plans.
 import crypto from "node:crypto";
-import { shouldProcessRow } from "./fulcrumProcessor.js";
+import { shouldProcessRow, initBrowser, login, goToInvoicing } from "./fulcrumProcessor.js";
 
 const FULCRUM_PUBLIC_API = "https://api.fulcrumpro.com/api";
 
@@ -208,4 +208,48 @@ export async function runInvoicingViaApi({
     }
   }
   return { processedInvoices, errors, dryRun, skipped: plan.skip.length };
+}
+
+// Top-level API-mode Fulcrum stage: log in (browser, for the session cookie the
+// create call needs), discover + create + issue via the API, return a result in
+// the SAME shape as runFulcrumProcessor so the summary email is unchanged.
+// Browser is used only for login + the create fetch — no clicking/Blazor waits.
+export async function runFulcrumApiMode(username, password, apiKey, { headless = true, dryRun = false, maxActions = null } = {}) {
+  let browser = null;
+  try {
+    const bp = await initBrowser(headless);
+    browser = bp.browser;
+    const page = bp.page;
+    await login(page, username, password);
+    await goToInvoicing(page);
+    const plan = await planNeedsActionFromApi(page);
+    console.log(`[API] Needs Action plan: ${JSON.stringify(plan.counts)}${dryRun ? " (DRY RUN)" : ""}`);
+    const res = await runInvoicingViaApi({ plan, page, apiKey, dryRun, maxActions, log: (m) => console.log(m) });
+    return {
+      processedInvoices: res.processedInvoices.map((p) => ({
+        soNumber: p.soNumber,
+        action: p.action === "create" ? "Created & Issued" : "Issued",
+        invoiceId: p.invoiceId,
+      })),
+      errors: res.errors,
+      success: res.errors.length === 0,
+      complete: true,
+      stoppedEarly: !!(maxActions && (plan.create.length + plan.issue.length) > maxActions),
+      stopReason: maxActions && (plan.create.length + plan.issue.length) > maxActions ? `reached API action limit (${maxActions})` : null,
+      actionAttempts: res.processedInvoices.length,
+      pagesVisited: 0,
+      apiMode: true,
+      dryRun: res.dryRun,
+      planCounts: plan.counts,
+    };
+  } catch (error) {
+    return {
+      processedInvoices: [],
+      errors: [`API mode fatal: ${error.message}`],
+      success: false, complete: false, stoppedEarly: false, stopReason: null,
+      actionAttempts: 0, pagesVisited: 0, apiMode: true,
+    };
+  } finally {
+    if (browser) { try { await browser.close(); } catch { /* ignore */ } }
+  }
 }

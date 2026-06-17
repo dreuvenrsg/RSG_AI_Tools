@@ -163,9 +163,18 @@ Bearer). Proceed to build (Phase 2) behind a flag with dry-run + browser fallbac
       untouched, per-invoice error isolation; DI'd create/issue). Unit-tested
       (91/91). Live-verified: dry-run planned 46 create / 50 skip (parity held);
       a maxActions=1 live run created+issued SO9772 → invoice 10385 → QBO 223799.
-- [ ] Phase 2b: wire `runInvoicingViaApi` into the Fulcrum stage behind
-      `FULCRUM_API_MODE` (browser login for session, then API create/issue),
-      with the browser-click path as fallback; supervised bounded batch; deploy.
+- [x] Phase 2b: wired into the Fulcrum stage via `runFulcrumStage` behind
+      `FULCRUM_API_MODE` (default OFF → no behavior change); `runFulcrumApiMode`
+      logs in for the session then discovers+creates+issues via API and returns
+      the `runFulcrumProcessor` result shape (summary email unchanged).
+      `FULCRUM_API_DRY_RUN` plans only. Added IAM read for
+      `/rsg-ai/prod/fulcrum-api-key`. Verified: dry-run wrapper (45 create
+      planned, parity held, email builds) + live `maxActions=3` batch
+      (SO9812/9827/9823 issued, QBO 223800/223801/sync, 0 errors). Tests 91/91.
+- [ ] Enablement: set `FULCRUM_API_MODE=1` on the Lambda (start with
+      `FULCRUM_MAX_ACTIONS` capped + watch logs) once comfortable; then consider
+      making it the default and Phase 3 (drop Chromium if create can avoid the
+      browser session).
 - [ ] Extend the UI/health-alert idea to the API (loud alert on unexpected
       HTTP status / shape change), analogous to specs/012's guard.
 - [ ] Phase 3 (optional): server-side stage, remove Chromium from `template.yaml`.

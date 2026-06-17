@@ -16,6 +16,7 @@ https://appcenter.intuit.com/connect/oauth2
   &state=xyz123
 */
 import { runFulcrumProcessor } from './fulcrumProcessor.js';
+import { runFulcrumApiMode } from './fulcrumInvoiceApi.js';
 // Add these imports at the top of your main file
 import { SSMClient, GetParameterCommand, PutParameterCommand } from "@aws-sdk/client-ssm";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
@@ -2071,8 +2072,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         console.log('🤖 Running Fulcrum processor (visible browser)...\n');
         logger.startStage('fulcrum');
         const localFulcrumOptions = buildFulcrumRunOptions({}, null);
-        console.log('[Fulcrum] Run options (local):', JSON.stringify(localFulcrumOptions));
-        fulcrumResults = await runFulcrumProcessor(
+        console.log('[Fulcrum] Run options (local):', JSON.stringify(localFulcrumOptions), 'apiMode:', !!process.env.FULCRUM_API_MODE);
+        fulcrumResults = await runFulcrumStage(
           fulcrumUsername,
           fulcrumPassword,
           false, // headless=false for local (visible browser)
@@ -2243,6 +2244,29 @@ function parsePositiveIntegerOption(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+// Load the Fulcrum public API key for FULCRUM_API_MODE (env or SSM, mirroring
+// src/fulcrum/client.js). Only called when API mode is enabled.
+async function getFulcrumApiKey() {
+  if (process.env.FULCRUM_API_KEY) return process.env.FULCRUM_API_KEY;
+  const res = await ssmClient.send(new GetParameterCommand({ Name: '/rsg-ai/prod/fulcrum-api-key', WithDecryption: true }));
+  return res.Parameter.Value;
+}
+
+// Run the Fulcrum stage via either the proven browser-click path (default) or
+// the API path (FULCRUM_API_MODE). API mode logs in for the session, then
+// discovers + creates + issues via HTTP — no clicking/Blazor waits. See specs/013.
+async function runFulcrumStage(username, password, headless, options) {
+  if (process.env.FULCRUM_API_MODE) {
+    const apiKey = await getFulcrumApiKey();
+    return runFulcrumApiMode(username, password, apiKey, {
+      headless,
+      dryRun: !!process.env.FULCRUM_API_DRY_RUN,
+      maxActions: options?.maxActionAttempts ?? null,
+    });
+  }
+  return runFulcrumProcessor(username, password, headless, options);
 }
 
 function buildFulcrumRunOptions(event = {}, context = null) {
@@ -2578,9 +2602,9 @@ export const handler = async (event, context) => {
     } else {
       try {
         const fulcrumRunOptions = buildFulcrumRunOptions(event, context);
-        console.log('[Fulcrum] Run options:', JSON.stringify(fulcrumRunOptions));
+        console.log('[Fulcrum] Run options:', JSON.stringify(fulcrumRunOptions), 'apiMode:', !!process.env.FULCRUM_API_MODE);
         logger.startStage('fulcrum');
-        fulcrumResults = await runFulcrumProcessor(
+        fulcrumResults = await runFulcrumStage(
           fulcrumUsername,
           fulcrumPassword,
           true, // headless mode for Lambda

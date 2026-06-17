@@ -81,6 +81,11 @@ Resources:
                 - ssm:GetParameter
                 - ssm:PutParameter
               Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/qbo-invoice-sender/*
+            # Read-only: Fulcrum public API key for FULCRUM_API_MODE (specs/013).
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rsg-ai/prod/fulcrum-api-key
             - Effect: Allow
               Action: ses:SendEmail
               Resource: "*"

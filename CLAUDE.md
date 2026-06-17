@@ -87,6 +87,11 @@ The allowlist arrays live in `V2_emailSender.js` (~line 137+) and are case-insen
 ### Configuration
 `const activeConfig = config.production;` (~line 466) switches between sandbox and production config blocks.
 
+### Fulcrum stage: browser vs API mode (specs/013)
+The Fulcrum stage runs through `runFulcrumStage()` in `V2_emailSender.js`, which picks one of two paths:
+- **Default (browser):** `runFulcrumProcessor` — Puppeteer DOM automation (`fulcrumProcessor.js`).
+- **`FULCRUM_API_MODE=1`:** `runFulcrumApiMode` (`fulcrumInvoiceApi.js`) — logs in for the session, then discovers (`GetInvoiceGridDataQuery`), creates (`CreateInvoiceFromSalesOrderCommand`), and issues (`POST /api/invoices/{id}/status {issued}` on the public Bearer API) entirely via HTTP — no clicking/Blazor waits, parallelizable. `FULCRUM_API_DRY_RUN=1` plans without writing. Skip rules (refunds/zero-value) reuse the same `shouldProcessRow`, so they're identical to the browser path. Needs SSM read on `/rsg-ai/prod/fulcrum-api-key` (granted in `template.yaml`). Verified equivalent (issues + triggers QBO sync) in specs/013 Phase 0.
+
 ### Testable exports
 `V2_emailSender.js` exports `buildFulcrumRunOptions`, `buildInvocationLockMetadata`, `buildSummaryEmailContent`, `customerModule`, and `utils`; `fulcrumProcessor.js` exports `isCreateDetailTimeoutError`. The regression suite (`tests/invoiceSender.test.js`) exercises these to protect: excluded-customer visibility in summary emails, HLI ship-to routing, and default primary-email recipient selection. When changing send/routing/summary logic, extend these tests and keep them green.
 
