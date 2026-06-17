@@ -158,6 +158,6 @@ These are part of every change, not optional extras:
 ## Troubleshooting
 
 - **"Chromium not found" in Lambda** — verify the layer ARN matches the deploy region in `template.yaml`.
-- **"NEEDS ACTION button not found"** — Fulcrum UI likely changed; update the selector in `fulcrumProcessor.js` and/or increase timeouts (`timeouts` config block).
+- **"NEEDS ACTION button not found" / "Invoicing page did not fully render"** — Fulcrum UI likely changed; update the selectors in `fulcrumProcessor.js` and/or increase timeouts (`timeouts` config block). The `[Debug] Invoicing page did not become ready: {...}` line in CloudWatch dumps the live DOM state (KPI cards, row count) and is the fastest way to see what moved. The invoicing **list** page uses a `j-*` component library (`j-kpi-filter`, `j-table-row`/`.cdk-row`, `j-table-cell`/`.cdk-column-*`, `j-paginator`); the invoice **detail** page (create/issue workflow) uses the older Bootstrap DOM (`.dropdown.actionsdrop`, `.card-footer`, `.modal-footer`). The 2026-06 list redesign migration is documented in `specs/012-fulcrum-invoicing-list-ui-migration.md`.
 - **Pagination loops** — `fulcrumProcessor.js` has a 20-page safety limit; check that the "NEEDS ACTION" filter stays active across page changes (see `checkNextPage()`).
 - **Function timeout** — normal for large batches (100+ invoices); watch `npm run logs` for progress.

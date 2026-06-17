@@ -100,6 +100,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `specs/008-chat-debugging-logs.md` | chatId-tagged logs, CloudWatch durability, and the agent's log-search tool |
 | `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + OpenAI); webhook + reconcile ingestion; semantic search tool |
 | `specs/010-customer-service-ticket-agent.md` | The `ticket-agent/` subsystem: agent-first Zendesk ticket classification, drafting, and the deterministic PO pipeline (moved from CSDroid) |
+| `specs/012-fulcrum-invoicing-list-ui-migration.md` | Fulcrum's invoicing-list redesign (`j-*` components) broke `fulcrumProcessor.js`; old→new selector map + list-page migration (detail/create/issue workflow unchanged) |
 
 ## ticket-agent/ (Zendesk customer-service subsystem)
 

@@ -158,8 +158,10 @@ async function waitForTableStable(page, options = {}) {
         const checkStability = () => {
           checkCount++;
 
-          // Get current table content
-          const rows = document.querySelectorAll('cdk-row, tr[role="row"], tbody tr');
+          // Get current table content. The redesigned invoicing list renders
+          // <j-table-row class="cdk-row" role="row">, so match by class/role
+          // (the old `cdk-row` TAG selector no longer matches anything).
+          const rows = document.querySelectorAll('.cdk-row, [role="row"], tbody tr');
           const currentContent = Array.from(rows)
             .slice(0, 10) // Check first 10 rows for efficiency
             .map(r => r.textContent?.trim() || '')
@@ -487,17 +489,17 @@ async function collectPageDiagnostics(page) {
       readyState: document.readyState,
       buttonCount: document.querySelectorAll('button').length,
       inputCount: document.querySelectorAll('input').length,
-      rowCount: document.querySelectorAll('cdk-row').length,
-      invoiceGridPresent: !!document.querySelector('[data-testid="invoicing-grid"], invoicing-grid'),
-      needsActionCardPresent: !!document.querySelector('kpi-total[displaystatus="NEEDS ACTION"]'),
-      needsActionButtonPresent: !!document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button'),
-      needsActionButtonText: document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button')?.textContent?.replace(/\s+/g, ' ').trim() || '',
-      kpiCards: Array.from(document.querySelectorAll('kpi-total')).map(card => ({
-        displaystatus: card.getAttribute('displaystatus'),
-        status: card.getAttribute('status'),
+      rowCount: document.querySelectorAll('.cdk-row').length,
+      invoiceGridPresent: !!document.querySelector('[data-testid="invoicing-grid"], invoicing-grid, invoicing-list'),
+      needsActionCardPresent: !!document.querySelector('j-kpi-filter[label="Needs Action"]'),
+      needsActionButtonPresent: !!document.querySelector('j-kpi-filter[label="Needs Action"] button'),
+      needsActionButtonText: document.querySelector('j-kpi-filter[label="Needs Action"] button')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+      kpiCards: Array.from(document.querySelectorAll('j-kpi-filter')).map(card => ({
+        label: card.getAttribute('label'),
+        color: card.getAttribute('color'),
         text: (card.textContent || '').replace(/\s+/g, ' ').trim()
       })),
-      rowSamples: Array.from(document.querySelectorAll('cdk-row')).slice(0, 5).map(row =>
+      rowSamples: Array.from(document.querySelectorAll('.cdk-row')).slice(0, 5).map(row =>
         (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 250)
       ),
       bodyTextSample: (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 700)
@@ -515,8 +517,8 @@ async function logPageDiagnostics(page, context) {
 async function waitForInvoicingPageReady(page) {
   try {
     await page.waitForFunction(() => {
-      const hasGrid = !!document.querySelector('[data-testid="invoicing-grid"], invoicing-grid');
-      const needsActionButton = document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button');
+      const hasGrid = !!document.querySelector('[data-testid="invoicing-grid"], invoicing-grid, invoicing-list');
+      const needsActionButton = document.querySelector('j-kpi-filter[label="Needs Action"] button');
       const hasSearchInput = Array.from(document.querySelectorAll('input')).some(
         input => input.placeholder && input.placeholder.includes('Search')
       );
@@ -526,7 +528,7 @@ async function waitForInvoicingPageReady(page) {
         hasSearchInput &&
         !!needsActionButton &&
         !!needsActionButton.textContent &&
-        needsActionButton.textContent.includes('NEEDS ACTION')
+        /needs action/i.test(needsActionButton.textContent)
       );
     }, { timeout: config.timeouts.elementWait });
   } catch (error) {
@@ -537,20 +539,22 @@ async function waitForInvoicingPageReady(page) {
 
 async function findNeedsActionButton(page) {
   const handle = await page.evaluateHandle(() => {
-    const directButton = document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button');
-    if (directButton && directButton.textContent.includes('NEEDS ACTION')) {
+    // Redesigned invoicing list: KPI filters are <j-kpi-filter label="Needs Action">
+    // wrapping a <button class="juicy-kpi ...">.
+    const directButton = document.querySelector('j-kpi-filter[label="Needs Action"] button');
+    if (directButton) {
       return directButton;
     }
 
-    const cards = Array.from(document.querySelectorAll('kpi-total'));
+    const cards = Array.from(document.querySelectorAll('j-kpi-filter'));
     const matchingCard = cards.find(card => {
-      const label = card.getAttribute('displaystatus') || '';
+      const label = card.getAttribute('label') || '';
       const text = card.textContent || '';
-      return label.includes('NEEDS ACTION') || text.includes('NEEDS ACTION');
+      return /needs action/i.test(label) || /needs action/i.test(text);
     });
 
     const fallbackButton = matchingCard?.querySelector('button');
-    if (fallbackButton && fallbackButton.textContent.includes('NEEDS ACTION')) {
+    if (fallbackButton) {
       return fallbackButton;
     }
 
@@ -569,85 +573,47 @@ async function findNeedsActionButton(page) {
 async function waitForNeedsActionFilterApplied(page) {
   await page.waitForFunction(() => {
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
-    const parseVisibleRgb = value => {
-      const parts = String(value || '').match(/\d+(\.\d+)?/g)?.map(Number);
-      if (!parts || parts.length < 3) return null;
-      const alpha = parts.length >= 4 ? parts[3] : 1;
-      return alpha > 0.1 ? parts.slice(0, 3) : null;
-    };
-    const luminance = rgb => (0.2126 * rgb[0]) + (0.7152 * rgb[1]) + (0.0722 * rgb[2]);
-    const needsActionButton = document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button');
-    const kpiCard = needsActionButton?.closest('kpi-total') || null;
-    const visualCandidates = [
-      needsActionButton,
-      needsActionButton?.parentElement,
-      kpiCard,
-      kpiCard?.firstElementChild
-    ].filter(Boolean);
-    const visuallySelected = visualCandidates.some(candidate => {
-      const backgroundRgb = parseVisibleRgb(window.getComputedStyle(candidate).backgroundColor);
-      return !!backgroundRgb && luminance(backgroundRgb) < 160;
-    });
+    // The redesigned KPI filter button gains the `active` class when selected
+    // (e.g. "juicy-kpi warning active").
+    const needsActionButton = document.querySelector('j-kpi-filter[label="Needs Action"] button');
+    const classSelected = !!needsActionButton && needsActionButton.classList.contains('active');
 
-    const rows = Array.from(document.querySelectorAll('cdk-row'));
+    const rows = Array.from(document.querySelectorAll('.cdk-row'));
     const rowsLookFiltered = rows.length > 0 && rows.every(row => {
       const rowText = normalize(row.textContent);
-      const rowButtonTexts = Array.from(row.querySelectorAll('button')).map(button => normalize(button.textContent));
-      return rowText.includes('Unissued') && rowButtonTexts.some(text => text === 'Create' || text === 'Issue');
+      const actionText = normalize(row.querySelector('.cdk-column-action')?.textContent);
+      return rowText.includes('Unissued') && (actionText === 'Create' || actionText === 'Issue');
     });
 
-    return visuallySelected || rowsLookFiltered;
+    return classSelected || rowsLookFiltered;
   }, { timeout: config.timeouts.elementWait });
 }
 
 async function getNeedsActionFilterState(page) {
   return page.evaluate(() => {
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
-    const parseVisibleRgb = value => {
-      const parts = String(value || '').match(/\d+(\.\d+)?/g)?.map(Number);
-      if (!parts || parts.length < 3) return null;
-      const alpha = parts.length >= 4 ? parts[3] : 1;
-      return alpha > 0.1 ? parts.slice(0, 3) : null;
-    };
-    const luminance = rgb => (0.2126 * rgb[0]) + (0.7152 * rgb[1]) + (0.0722 * rgb[2]);
-    const needsActionBtn = document.querySelector('kpi-total[displaystatus="NEEDS ACTION"] button');
-    const kpiCard = needsActionBtn?.closest('kpi-total') || null;
-    const visualCandidates = [
-      needsActionBtn,
-      needsActionBtn?.parentElement,
-      kpiCard,
-      kpiCard?.firstElementChild
-    ].filter(Boolean);
-    const selectedVisual = visualCandidates.find(candidate => {
-      const backgroundRgb = parseVisibleRgb(window.getComputedStyle(candidate).backgroundColor);
-      return !!backgroundRgb && luminance(backgroundRgb) < 160;
-    });
-    const visuallySelected = !!selectedVisual;
+    // Redesigned KPI filter: <j-kpi-filter label="Needs Action"><button class="juicy-kpi warning active">.
+    const needsActionBtn = document.querySelector('j-kpi-filter[label="Needs Action"] button');
     const classSelected = !!needsActionBtn && (
       needsActionBtn.classList.contains('active') ||
-      needsActionBtn.classList.contains('btn-primary') ||
       needsActionBtn.classList.contains('selected') ||
       needsActionBtn.getAttribute('aria-pressed') === 'true'
     );
 
-    const rows = Array.from(document.querySelectorAll('cdk-row'));
+    const rows = Array.from(document.querySelectorAll('.cdk-row'));
     const rowsLookFiltered = rows.length > 0 && rows.every(row => {
       const rowText = normalize(row.textContent);
-      const rowButtonTexts = Array.from(row.querySelectorAll('button')).map(button => normalize(button.textContent));
-      return rowText.includes('Unissued') && rowButtonTexts.some(text => text === 'Create' || text === 'Issue');
+      const actionText = normalize(row.querySelector('.cdk-column-action')?.textContent);
+      return rowText.includes('Unissued') && (actionText === 'Create' || actionText === 'Issue');
     });
 
     return {
-      isActive: classSelected || visuallySelected || rowsLookFiltered,
+      isActive: classSelected || rowsLookFiltered,
       classSelected,
-      visuallySelected,
       rowsLookFiltered,
       rowCount: rows.length,
       needsActionText: normalize(needsActionBtn?.textContent),
-      needsActionClass: needsActionBtn?.className || null,
-      selectedVisualTag: selectedVisual?.tagName || null,
-      selectedVisualClass: selectedVisual?.className || null,
-      selectedVisualBackground: selectedVisual ? window.getComputedStyle(selectedVisual).backgroundColor : null
+      needsActionClass: needsActionBtn?.className || null
     };
   });
 }
@@ -716,23 +682,60 @@ async function verifyNeedsActionActive(page) {
 // Read paginator state from the current table view
 async function getPageInfo(page) {
   return page.evaluate(() => {
-    const allPages = Array.from(document.querySelectorAll('.p-paginator-page'));
-    const currentPage = document.querySelector('.p-paginator-page.p-paginator-page-selected');
-    const nextButton = document.querySelector('.p-paginator-next');
+    // Redesigned list uses a Material-style <j-paginator> showing a range label
+    // ("1 – 25 of 152") plus nav buttons [first, prev, next, last]. There are no
+    // numbered page buttons anymore, so derive page numbers from the range.
+    const paginator = document.querySelector('j-paginator');
+    const rangeText = paginator ? (paginator.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    const match = rangeText.match(/([\d,]+)\s*[–-]\s*([\d,]+)\s+of\s+([\d,]+)/);
+    const toInt = s => parseInt(String(s).replace(/,/g, ''), 10);
+
+    let currentPageNum = 1;
+    let totalPages = 1;
+    if (match) {
+      const start = toInt(match[1]);
+      const end = toInt(match[2]);
+      const total = toInt(match[3]);
+      const pageSize = Math.max(1, end - start + 1);
+      currentPageNum = Math.floor((start - 1) / pageSize) + 1;
+      totalPages = Math.max(1, Math.ceil(total / pageSize));
+    }
+
+    // Nav buttons render in order [first, prev, next, last]; "next" is the
+    // second-to-last button (also robust to a 2-button [prev, next] layout).
+    const navButtons = paginator ? Array.from(paginator.querySelectorAll('button')) : [];
+    const nextButton = navButtons.length >= 2 ? navButtons[navButtons.length - 2] : null;
     const isNextDisabled = !!nextButton && (
-      nextButton.classList.contains('p-paginator-element-disabled') ||
       nextButton.disabled ||
-      nextButton.getAttribute('aria-disabled') === 'true'
+      nextButton.getAttribute('aria-disabled') === 'true' ||
+      nextButton.getAttribute('disabled') !== null
     );
 
-    const parsedCurrent = currentPage ? parseInt(currentPage.textContent.trim(), 10) : 1;
-
     return {
-      totalPages: allPages.length,
-      currentPageNum: Number.isNaN(parsedCurrent) ? 1 : parsedCurrent,
+      totalPages,
+      currentPageNum: Number.isNaN(currentPageNum) ? 1 : currentPageNum,
       hasNextButton: !!nextButton,
       isNextDisabled
     };
+  });
+}
+
+// Click the paginator "next" button (second-to-last nav button). Returns true if clicked.
+async function clickNextPageButton(page) {
+  return page.evaluate(() => {
+    const paginator = document.querySelector('j-paginator');
+    const navButtons = paginator ? Array.from(paginator.querySelectorAll('button')) : [];
+    const nextButton = navButtons.length >= 2 ? navButtons[navButtons.length - 2] : null;
+    const disabled = !!nextButton && (
+      nextButton.disabled ||
+      nextButton.getAttribute('aria-disabled') === 'true' ||
+      nextButton.getAttribute('disabled') !== null
+    );
+    if (nextButton && !disabled) {
+      nextButton.click();
+      return true;
+    }
+    return false;
   });
 }
 
@@ -748,14 +751,7 @@ async function goToPage(page, targetPageNum) {
 
   let attempts = 0;
   while (pageInfo.currentPageNum < desiredPage && attempts < desiredPage + 5) {
-    const clicked = await page.evaluate(() => {
-      const nextButton = document.querySelector('.p-paginator-next');
-      if (nextButton && !nextButton.classList.contains('p-paginator-element-disabled')) {
-        nextButton.click();
-        return true;
-      }
-      return false;
-    });
+    const clicked = await clickNextPageButton(page);
 
     if (!clicked) {
       console.log(`[Pagination] Could not advance from page ${pageInfo.currentPageNum} while restoring to page ${desiredPage}`);
@@ -788,23 +784,26 @@ async function returnToNeedsActionPage(page, targetPageNum) {
 async function extractRowData(row) {
   try {
     const data = await row.evaluate(el => {
+      // Redesigned list: cells are <j-table-cell class="cdk-column-...">, so match
+      // by the cdk-column-* CLASS (the old `cdk-cell` tag prefix no longer exists).
       // Get Sales Order Balance
-      const balanceEl = el.querySelector('cdk-cell.cdk-column-salesOrderBalance');
+      const balanceEl = el.querySelector('.cdk-column-salesOrderBalance');
       const balanceText = balanceEl ? balanceEl.textContent.trim() : '$0.00';
-      const balance = parseFloat(balanceText.replace(/[$,]/g, '')) || 0;
-      
-      // Get Invoice Total
-      const totalEl = el.querySelector('cdk-cell.cdk-column-invoice-total');
+      const balance = parseFloat(balanceText.replace(/[$,()]/g, '')) || 0;
+
+      // Get Invoice Total (negative totals render as "($436.05)")
+      const totalEl = el.querySelector('.cdk-column-invoice-total');
       const totalText = totalEl ? totalEl.textContent.trim() : '$0.00';
-      const total = parseFloat(totalText.replace(/[$,]/g, '')) || 0;
-      
-      // Check for REFUND badge
-      const hasRefund = !!el.querySelector('.refund-badge');
-      
-      // Get Sales Order Number
-      const soLink = el.querySelector('cdk-cell.cdk-column-salesOrderNumber a b');
+      const total = parseFloat(totalText.replace(/[$,()]/g, '')) || 0;
+
+      // Get Sales Order Number (link text, e.g. "SO7013"). Refunds now render as
+      // "SO#### - REFUND" in this cell instead of a separate .refund-badge.
+      const soCell = el.querySelector('.cdk-column-salesOrderNumber');
+      const soLink = soCell ? soCell.querySelector('a') : null;
       const soNumber = soLink ? soLink.textContent.trim() : 'Unknown';
-      
+      const hasRefund = !!el.querySelector('.refund-badge') ||
+        /refund/i.test(soCell ? soCell.textContent : '');
+
       return { balance, total, hasRefund, soNumber };
     });
     
@@ -841,7 +840,7 @@ async function waitForCreateDetailReady(page, timeoutMs) {
 }
 
 async function findRowBySoNumber(page, soNumber) {
-  const rows = await page.$$('cdk-row');
+  const rows = await page.$$('.cdk-row');
 
   for (const row of rows) {
     const rowData = await extractRowData(row);
@@ -854,10 +853,13 @@ async function findRowBySoNumber(page, soNumber) {
 }
 
 async function runCreateWorkflow(page, row, rowData, targetPageNum, detailTimeoutMs, actionDelayMs) {
-  // Click Create button
+  // Click the list row's "Create" button. In the redesigned list this button
+  // lives in the action cell (.cdk-column-action) and no longer carries the
+  // .btn-primary class, so match it by location + text.
   const clicked = await row.evaluate(el => {
-    const buttons = Array.from(el.querySelectorAll('button'));
-    const createBtn = buttons.find(btn => btn.textContent.trim() === 'Create' && btn.classList.contains('btn-primary'));
+    const scope = el.querySelector('.cdk-column-action') || el;
+    const buttons = Array.from(scope.querySelectorAll('button'));
+    const createBtn = buttons.find(btn => btn.textContent.trim() === 'Create');
     if (createBtn) {
       createBtn.click();
       return true;
@@ -1048,17 +1050,19 @@ async function processIssue(page, row, rowData, errors, targetPageNum) {
 async function runIssueWorkflow(page, row, rowData, targetPageNum) {
   console.log(`[Row] Starting ISSUE workflow for ${rowData.soNumber}...`);
     
-    // Click Issue button
+    // Click the list row's "Issue" button (action cell, no .btn-primary in the
+    // redesigned list — match by location + text).
     const clicked = await row.evaluate(el => {
-      const buttons = Array.from(el.querySelectorAll('button'));
-      const issueBtn = buttons.find(btn => btn.textContent.trim() === 'Issue' && btn.classList.contains('btn-primary'));
+      const scope = el.querySelector('.cdk-column-action') || el;
+      const buttons = Array.from(scope.querySelectorAll('button'));
+      const issueBtn = buttons.find(btn => btn.textContent.trim() === 'Issue');
       if (issueBtn) {
         issueBtn.click();
         return true;
       }
       return false;
     });
-    
+
     if (!clicked) throw new Error('Issue button not found');
     
     // Wait for detail page
@@ -1127,9 +1131,9 @@ async function processPage(page, processedInvoices, errors, processedSOSet, limi
       const pageInfo = await getPageInfo(page);
       const currentPageNum = pageInfo.currentPageNum;
 
-      await page.waitForSelector('cdk-row', { visible: true, timeout: config.timeouts.elementWait });
+      await page.waitForSelector('.cdk-row', { visible: true, timeout: config.timeouts.elementWait });
 
-      const rows = await page.$$('cdk-row');
+      const rows = await page.$$('.cdk-row');
       console.log(`[Process] Found ${rows.length} rows on page`);
 
       if (rows.length === 0) return false;
@@ -1154,15 +1158,16 @@ async function processPage(page, processedInvoices, errors, processedSOSet, limi
 
         console.log(`[Process] Row ${i + 1}: ${rowData.soNumber}, $${rowData.balance} / $${rowData.total}, Refund=${rowData.hasRefund}`);
 
-        // Check which button is present
+        // Check which action button the row exposes. In the redesigned list the
+        // action button sits in .cdk-column-action and no longer has .btn-primary.
         const hasCreate = await row.evaluate(el => {
-          const buttons = Array.from(el.querySelectorAll('button'));
-          return buttons.some(btn => btn.textContent.trim() === 'Create' && btn.classList.contains('btn-primary'));
+          const scope = el.querySelector('.cdk-column-action') || el;
+          return Array.from(scope.querySelectorAll('button')).some(btn => btn.textContent.trim() === 'Create');
         });
 
         const hasIssue = await row.evaluate(el => {
-          const buttons = Array.from(el.querySelectorAll('button'));
-          return buttons.some(btn => btn.textContent.trim() === 'Issue' && btn.classList.contains('btn-primary'));
+          const scope = el.querySelector('.cdk-column-action') || el;
+          return Array.from(scope.querySelectorAll('button')).some(btn => btn.textContent.trim() === 'Issue');
         });
 
         // Check if we should process
@@ -1248,14 +1253,7 @@ async function checkNextPage(page) {
     }
 
     // Click the next button
-    const clicked = await page.evaluate(() => {
-      const nextButton = document.querySelector('.p-paginator-next');
-      if (nextButton && !nextButton.classList.contains('p-paginator-element-disabled')) {
-        nextButton.click();
-        return true;
-      }
-      return false;
-    });
+    const clicked = await clickNextPageButton(page);
 
     if (!clicked) {
       console.log('[Pagination] Could not click next button');
@@ -1310,17 +1308,21 @@ async function gotoNeedsAction(page, username, password) {
 // row. Permanently-skippable rows (refunds / failed validation) are added to the
 // claim set so no worker re-examines them. Returns a claim or null (none here).
 async function scanCurrentViewForClaim(page, shared) {
-  await page.waitForSelector('cdk-row', { visible: true, timeout: config.timeouts.elementWait }).catch(() => {});
-  const rows = await page.$$('cdk-row');
+  await page.waitForSelector('.cdk-row', { visible: true, timeout: config.timeouts.elementWait }).catch(() => {});
+  const rows = await page.$$('.cdk-row');
   for (const row of rows) {
     const rowData = await extractRowData(row);
     if (!rowData || rowData.soNumber === 'Unknown') continue;
     if (shared.claimedSet.has(rowData.soNumber)) continue;
 
-    const hasCreate = await row.evaluate(el =>
-      Array.from(el.querySelectorAll('button')).some(b => b.textContent.trim() === 'Create' && b.classList.contains('btn-primary')));
-    const hasIssue = await row.evaluate(el =>
-      Array.from(el.querySelectorAll('button')).some(b => b.textContent.trim() === 'Issue' && b.classList.contains('btn-primary')));
+    const hasCreate = await row.evaluate(el => {
+      const scope = el.querySelector('.cdk-column-action') || el;
+      return Array.from(scope.querySelectorAll('button')).some(b => b.textContent.trim() === 'Create');
+    });
+    const hasIssue = await row.evaluate(el => {
+      const scope = el.querySelector('.cdk-column-action') || el;
+      return Array.from(scope.querySelectorAll('button')).some(b => b.textContent.trim() === 'Issue');
+    });
 
     if (!hasCreate && !hasIssue) { shared.claimedSet.add(rowData.soNumber); continue; }
     if (!shouldProcessRow(rowData.balance, rowData.total, rowData.hasRefund, hasCreate, hasIssue)) {
