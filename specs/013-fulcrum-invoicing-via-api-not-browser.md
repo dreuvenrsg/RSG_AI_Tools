@@ -137,9 +137,19 @@ Lambda with no Chromium).
       the internal UI surface.
 - [x] Phase 0: public Bearer API check — `POST /api/invoices/{id}/status` exists
       (issue candidate, server-side); no public create-from-SO endpoint.
-- [ ] Phase 0 (final, supervised): verify `POST /api/invoices/{id}/status`=issued
-      emails the customer + triggers QBO sync identically to the UI (single
-      invoice, compare real outputs); capture the exact status payload.
+- [x] Phase 0 (final, supervised): **VERIFIED.** Created a draft via
+      `CreateInvoiceFromSalesOrderCommand` (response `{createdInvoiceId}`), then
+      `POST /api/invoices/{id}/status {"status":"issued"}` → HTTP 200; within 8s
+      the invoice showed `status=issued`, `issueDate` set, and
+      `externalReferences.qbo-invoice` populated (QBO id + URL) — i.e. it issued
+      AND triggered the Fulcrum→QBO sync (which auto-emails) exactly like the UI.
+      Test invoice: 10384 / SO9737 / $0.60 → QBO 223798. Payload schema:
+      `InvoiceRequestUpdateStatus { status: enum[new,needsApproval,approved,issued,paid], paidDate? }`.
+
+**Phase 0 conclusion:** the full API path works browser-free for issue —
+discover (`GetInvoiceGridDataQuery`, cookie) → create (`CreateInvoiceFrom
+SalesOrderCommand`, cookie) → issue (`POST /api/invoices/{id}/status` `{issued}`,
+Bearer). Proceed to build (Phase 2) behind a flag with dry-run + browser fallback.
 - [x] Phase 1a: `fulcrumInvoiceApi.js` — fetch the Needs Action list via
       `GetInvoiceGridDataQuery` (paged), normalize + classify reusing
       `shouldProcessRow`; pure functions unit-tested; **99/99 live skip parity**
