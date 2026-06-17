@@ -9,7 +9,10 @@
 //
 // Writes (actually create/issue via API) are a later, supervised phase; this
 // module only reads + plans.
+import crypto from "node:crypto";
 import { shouldProcessRow } from "./fulcrumProcessor.js";
+
+const FULCRUM_PUBLIC_API = "https://api.fulcrumpro.com/api";
 
 const NEEDS_ACTION_GRID_PATH =
   "/api/Invoices/GetInvoiceGridDataQuery?Status=Needs%20Action&CustomerId=" +
@@ -124,4 +127,85 @@ export async function fetchNeedsActionInvoices(page, { take = 500, maxPages = 40
 export async function planNeedsActionFromApi(page, opts = {}) {
   const rows = await fetchNeedsActionInvoices(page, opts);
   return planInvoiceActions(rows);
+}
+
+// ===== Writes (specs/013 Phase 2) =====
+// These mutate Fulcrum and are part of the invoicing automation (the monolith),
+// NOT the read-only agent layer — so they use raw fetch with the API key and do
+// NOT route through src/fulcrum/client.js (whose read-only guard must stay intact).
+
+// Create a draft invoice from a sales order via the internal session API
+// (cookie auth — runs in the authenticated page origin). Returns the new id.
+export async function createInvoiceFromSalesOrder(page, salesOrderId, { gridId } = {}) {
+  const gid = gridId || crypto.randomBytes(16).toString("hex");
+  const res = await page.evaluate(async (soId, g) => {
+    const r = await fetch(
+      `/api/Invoices/CreateInvoiceFromSalesOrderCommand?SalesOrderId=${soId}&InvoiceGridId=${g}&IsDeposit=false`,
+      { method: "POST", credentials: "include", headers: { Accept: "application/json" } }
+    );
+    return { status: r.status, body: await r.text() };
+  }, salesOrderId, gid);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`CreateInvoiceFromSalesOrder HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+  }
+  let id = null;
+  try { id = JSON.parse(res.body).createdInvoiceId; } catch { /* fall through */ }
+  if (!id) throw new Error(`CreateInvoiceFromSalesOrder: no createdInvoiceId in ${res.body.slice(0, 200)}`);
+  return id;
+}
+
+// Issue an invoice via the public Bearer API. Verified (specs/013 Phase 0) to
+// set status=issued AND trigger the Fulcrum→QBO sync (which auto-emails).
+export async function issueInvoiceViaApi(invoiceId, apiKey, { fetchImpl = fetch } = {}) {
+  const r = await fetchImpl(`${FULCRUM_PUBLIC_API}/invoices/${invoiceId}/status`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ status: "issued" }),
+  });
+  if (!r.ok) throw new Error(`issueInvoice HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return true;
+}
+
+// Read an invoice (public Bearer API) — for post-issue verification.
+export async function getInvoiceById(invoiceId, apiKey, { fetchImpl = fetch } = {}) {
+  const r = await fetchImpl(`${FULCRUM_PUBLIC_API}/invoices/${invoiceId}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+  });
+  if (!r.ok) throw new Error(`getInvoice HTTP ${r.status}`);
+  return r.json();
+}
+
+// Orchestrate a create/issue run from a plan. Dependency-injected create/issue
+// so the control flow (dry-run, action cap, skip-by-construction, error
+// collection) is unit-testable without network. `create` entries are created
+// then issued; `issue` entries (existing drafts) are issued directly. The plan's
+// `skip` bucket is never touched — skip parity is preserved by construction.
+export async function runInvoicingViaApi({
+  plan, page, apiKey, dryRun = false, maxActions = null,
+  create = createInvoiceFromSalesOrder, issue = issueInvoiceViaApi, log = () => {},
+}) {
+  const work = [...plan.create, ...plan.issue];
+  const processedInvoices = [];
+  const errors = [];
+  let count = 0;
+  for (const item of work) {
+    if (maxActions && count >= maxActions) break;
+    count++;
+    try {
+      if (dryRun) {
+        log(`[API][dry-run] would ${item.action} ${item.soNumber} ($${item.total})`);
+        processedInvoices.push({ soNumber: item.soNumber, action: item.action, dryRun: true });
+        continue;
+      }
+      let invoiceId = item.invoiceId;
+      if (item.action === "create") invoiceId = await create(page, item.salesOrderId);
+      await issue(invoiceId, apiKey);
+      processedInvoices.push({ soNumber: item.soNumber, action: item.action, invoiceId });
+      log(`[API] ${item.action} + issued ${item.soNumber} (invoice ${invoiceId})`);
+    } catch (e) {
+      errors.push(`${item.soNumber}: ${e.message}`);
+      log(`[API] FAILED ${item.soNumber}: ${e.message}`);
+    }
+  }
+  return { processedInvoices, errors, dryRun, skipped: plan.skip.length };
 }

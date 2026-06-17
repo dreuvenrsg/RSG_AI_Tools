@@ -85,3 +85,59 @@ test('planInvoiceActions: buckets and counts a mixed set with refund/zero skips'
   assert.equal(plan.counts.skipByReason['create-needs-positive-balance-and-total'], 1);
   assert.equal(plan.counts.skipByReason['issue-needs-positive-total'], 1);
 });
+
+// ---- runInvoicingViaApi orchestration (injected create/issue, no network) ----
+
+import { runInvoicingViaApi } from '../fulcrumInvoiceApi.js';
+
+const samplePlan = () => ({
+  create: [{ soNumber: 'SO1', action: 'create', salesOrderId: 'so1', total: 10 },
+           { soNumber: 'SO2', action: 'create', salesOrderId: 'so2', total: 20 }],
+  issue:  [{ soNumber: 'SO3', action: 'issue', invoiceId: 'inv3', total: 30 }],
+  skip:   [{ soNumber: 'SO4', action: 'skip', reason: 'refund' }],
+  counts: {},
+});
+
+test('runInvoicingViaApi: dry-run performs no writes', async () => {
+  let creates = 0, issues = 0;
+  const r = await runInvoicingViaApi({
+    plan: samplePlan(), page: {}, apiKey: 'k', dryRun: true,
+    create: async () => { creates++; return 'x'; }, issue: async () => { issues++; },
+  });
+  assert.equal(creates, 0);
+  assert.equal(issues, 0);
+  assert.equal(r.processedInvoices.length, 3);
+  assert.ok(r.processedInvoices.every(p => p.dryRun));
+});
+
+test('runInvoicingViaApi: create entries are created then issued; issue entries issued directly', async () => {
+  const calls = [];
+  const r = await runInvoicingViaApi({
+    plan: samplePlan(), page: {}, apiKey: 'k',
+    create: async (page, soId) => { calls.push(`create:${soId}`); return `inv-${soId}`; },
+    issue: async (id) => { calls.push(`issue:${id}`); },
+  });
+  assert.deepEqual(calls, ['create:so1', 'issue:inv-so1', 'create:so2', 'issue:inv-so2', 'issue:inv3']);
+  assert.equal(r.processedInvoices.length, 3);
+  assert.equal(r.errors.length, 0);
+  assert.equal(r.skipped, 1); // skip bucket never touched
+});
+
+test('runInvoicingViaApi: maxActions caps the number processed', async () => {
+  const r = await runInvoicingViaApi({
+    plan: samplePlan(), page: {}, apiKey: 'k', maxActions: 1,
+    create: async () => 'inv', issue: async () => {},
+  });
+  assert.equal(r.processedInvoices.length, 1);
+});
+
+test('runInvoicingViaApi: a failed invoice is collected and does not stop the rest', async () => {
+  const r = await runInvoicingViaApi({
+    plan: samplePlan(), page: {}, apiKey: 'k',
+    create: async (page, soId) => { if (soId === 'so1') throw new Error('boom'); return `inv-${soId}`; },
+    issue: async () => {},
+  });
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0], /SO1: boom/);
+  assert.equal(r.processedInvoices.length, 2); // SO2 + SO3 still processed
+});

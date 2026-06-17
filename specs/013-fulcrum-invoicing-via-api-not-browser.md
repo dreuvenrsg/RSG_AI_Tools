@@ -157,8 +157,15 @@ Bearer). Proceed to build (Phase 2) behind a flag with dry-run + browser fallbac
 - [ ] Phase 1b: wire the API plan into the run (behind a flag) to drive the
       existing click-issuer via `findRowBySoNumber`, replacing the DOM
       discovery/pagination walk.
-- [ ] Phase 2: direct create/issue behind `FULCRUM_API_MODE`, dry-run + supervised
-      single-invoice verify, then batch with rate limiting; browser path as fallback.
+- [x] Phase 2a: `fulcrumInvoiceApi.js` write primitives + orchestrator —
+      `createInvoiceFromSalesOrder` (session), `issueInvoiceViaApi` (Bearer),
+      `getInvoiceById`, `runInvoicingViaApi` (dry-run, maxActions cap, skip bucket
+      untouched, per-invoice error isolation; DI'd create/issue). Unit-tested
+      (91/91). Live-verified: dry-run planned 46 create / 50 skip (parity held);
+      a maxActions=1 live run created+issued SO9772 → invoice 10385 → QBO 223799.
+- [ ] Phase 2b: wire `runInvoicingViaApi` into the Fulcrum stage behind
+      `FULCRUM_API_MODE` (browser login for session, then API create/issue),
+      with the browser-click path as fallback; supervised bounded batch; deploy.
 - [ ] Extend the UI/health-alert idea to the API (loud alert on unexpected
       HTTP status / shape change), analogous to specs/012's guard.
 - [ ] Phase 3 (optional): server-side stage, remove Chromium from `template.yaml`.
