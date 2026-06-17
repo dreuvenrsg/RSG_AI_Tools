@@ -88,12 +88,18 @@ check classified **99/99 rows identically** to a DOM scrape of the same moment
 - Issue: **public `POST /api/invoices/{id}/status`** (Bearer key) — server-side,
   removes the slow Blazor detail-page step entirely.
 
+**Status enum confirmed (read-only, via our Bearer key):** invoice `status` is
+the issue lifecycle — values include `new` (draft), **`issued`**, `paid` (a
+50-invoice sample tallied `{paid:49, issued:1}`). So issuing = `POST
+/api/invoices/{id}/status` with `status:"issued"`. The path is viable.
+
 **KEY OPEN RISK (must verify before any batch):** does the public status change
-to "issued" also (a) email the customer and (b) trigger the Fulcrum→QBO sync,
+to `issued` also (a) email the customer and (b) trigger the Fulcrum→QBO sync,
 exactly as the UI issue does? If it only flips status without emailing/syncing,
 it is NOT equivalent and would break downstream. Requires a supervised
 single-invoice test comparing real outputs (Fulcrum status, customer email
-sent, QBO sync) against the click path. Also confirm the exact status payload.
+sent, QBO sync) against the click path. This test issues a real invoice via the
+unverified path (emails a customer), so it needs explicit go-ahead.
 
 **Auth for replay:** after one Puppeteer login, calling `fetch()` from the page
 context (`page.evaluate`) carries the session cookie + CSRF automatically —
