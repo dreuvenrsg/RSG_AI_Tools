@@ -58,6 +58,52 @@ detail-page logic needed no changes; the fix is confined to the list page.
       `clickNextPageButton`; rewire `goToPage` / `checkNextPage`.
 - [x] Leave detail-page create/issue workflow untouched (verified unchanged).
 
+### Hardening (added after the first full local runs)
+
+- [x] **UI regression guard.** `evaluateInvoicingUiHealth()` (pure, unit-tested)
+      runs once per run via `runUiHealthCheckOnce` (module flag) at the end of
+      `clickNeedsAction`. It verifies the KPI filter button, that a >0 KPI count
+      has matching `.cdk-row`s (the exact silent-failure mode of this outage),
+      the expected `.cdk-column-*` cells, an action button, and the paginator.
+      Result rides on `fulcrumResults.uiHealthCheck`; `buildSummaryEmailContent`
+      raises a loud top-of-body **ALERT box** + `⚠️ FULCRUM UI REGRESSION` subject
+      prefix when it trips.
+- [x] **`shouldProcessRow` no longer throws.** A row with no recognized
+      Create/Issue button now returns `false` (skip) instead of throwing. The
+      throw used to bubble up through `processPage` and abort the entire Fulcrum
+      stage on a single odd row — observed on **SO2617** ($0 / $36,529.60, no
+      action button), which halted run #2 after only 7 invoices. `processPage`
+      also logs the action-cell text for such rows so a selector miss is
+      distinguishable from a genuine no-action row.
+
+### Timeout / retry behavior (`processCreate`, `processIssue`)
+
+Fulcrum's detail pages are sometimes slow; the workflows treat **timeout-style
+errors** (`Navigation timeout … exceeded` or `Waiting failed: …exceeded`, via
+the shared `isCreateDetailTimeoutError` matcher) as retryable. CREATE retries up
+to **3 attempts** (extended timeouts on retries: `extendedDetailTimeout: 50s`);
+ISSUE retries up to **3 attempts** as well. Non-timeout errors (e.g. a button
+genuinely absent) are **not** retried — they're logged, counted as a Fulcrum
+error, the row is marked processed, and it's left for the next run.
+
+Crucially, a retry is **recover-then-decide**, not a blind re-run, because a
+timeout often fires *after* the action already took effect (so re-running would
+create a **duplicate invoice**). On a timeout the code returns to the Needs
+Action list, waits, re-finds the row by SO#, and branches:
+
+| Row state after timeout | Action taken |
+|---|---|
+| Row gone from Needs Action | create+issue completed → assume success, no re-run |
+| Row now shows **Issue** | draft was created → **switch to the ISSUE workflow** to finish it (fixes the old "Create button not found" hard-fail, e.g. SO9541/SO9859) |
+| Row still shows **Create** | create never happened → **re-run CREATE** with extended waits (attempt 2/3) |
+| Row shows something else (e.g. "Email") | already issued → assume success |
+
+This means a genuinely-incomplete action is revisited up to 3×, while a timeout
+on a *confirmation* wait is recognized as progress rather than re-attempted —
+preventing duplicate invoices. Verified live in run #4: 14 timeouts, 3
+Create→Issue switches, **0 hard failures** (those 3 would have been hard fails
+before the fix).
+
 ## Verification
 
 - [x] `npm test` — 65/65 green; module imports cleanly.
@@ -83,14 +129,22 @@ detail-page logic needed no changes; the fix is confined to the list page.
 
 ## Follow-ups
 
-- [ ] Deploy to Lambda (`npm run deploy`) so the nightly run picks up the fix.
-      Until deployed, the scheduled run keeps failing.
-- [ ] A ~151-invoice backlog accrued during the 4+ day outage; the first run
-      after deploy will be large (watch for the 900s timeout — normal for big
-      batches per CLAUDE.md). Consider a one-off higher `FULCRUM_WORKERS`.
-- [ ] Draft invoice **10320 (SO9796)** was created during investigation and
-      left unissued; it will be issued by the next run (now an "Issue" row) or
-      can be issued/deleted manually.
-- [ ] These selectors are now coupled to Fulcrum's `j-*` component DOM. If it
-      changes again the same class of failure recurs — the `[Debug]`
-      diagnostics line is the fastest way to re-diagnose.
+- [x] Deploy the selector migration to Lambda (commit `7afe489`).
+- [ ] Deploy the hardening pass (UI regression guard + `shouldProcessRow` fix).
+- [ ] The outage backlog is being drained via local runs; remaining items clear
+      on the nightly run. Large batches can approach the 900s timeout (normal);
+      consider a one-off higher `FULCRUM_WORKERS` if it lags.
+- [x] Draft invoice **10320 (SO9796)** issued on a later run (picked up as an
+      "Issue" row), confirming the self-heal path.
+- [ ] **Retry edge case (`SO9541`-type).** When a timed-out CREATE already
+      created the draft, the retry finds the row as an "Issue" row and fails with
+      "Create button not found" (counts as 1 Fulcrum error; invoice is a safe
+      created-but-unissued draft that self-heals next run). `processCreate`
+      should detect this and switch to the Issue workflow instead of erroring.
+- [ ] **Detail-page timeout rate.** Some runs see many CREATEs hit the ~30s
+      detail-page wait and complete via the recovery path (slower, noisier).
+      Mostly environmental (Fulcrum/network); revisit `waitForCreateDetailReady`
+      timeouts if it persists in Lambda.
+- [ ] These selectors are coupled to Fulcrum's `j-*` component DOM. If it
+      changes again, the UI regression guard now raises an email alert and the
+      `[Debug]`/`[UICheck]` log lines are the fastest way to re-diagnose.

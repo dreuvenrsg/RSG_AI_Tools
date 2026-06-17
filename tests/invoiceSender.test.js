@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isCreateDetailTimeoutError } from '../fulcrumProcessor.js';
+import { isCreateDetailTimeoutError, evaluateInvoicingUiHealth, shouldProcessRow } from '../fulcrumProcessor.js';
 import { buildFulcrumRunOptions, buildInvocationLockMetadata, buildSummaryEmailContent, customerModule, utils, resolveAuditRange, buildAuditReportEmail, buildAuditAllClearEmail } from '../V2_emailSender.js';
 
 test('summary email separates explicit exclusions from allowlist misses', () => {
@@ -424,4 +424,134 @@ test('summary email renders helpful error messages and never surfaces a bare "{}
   assert.match(body, /Could not determine a trackingNumber/);
   assert.match(body, /Fulcrum API error: 500 - Execution Timeout Expired/);
   assert.ok(!body.includes('{}'), 'summary body must never contain a bare "{}"');
+});
+
+// ===== Fulcrum invoicing-list UI regression guard =====
+
+const healthySnapshot = {
+  kpiFilterButtonPresent: true,
+  needsActionCount: 148,
+  rowCount: 25,
+  firstRowColumns: ['invoiceNumber', 'customerSummary-name', 'salesOrderNumber', 'salesOrderBalance', 'invoice-total', 'invoiceStatus', 'shippingStatus', 'action'],
+  anyActionButton: true,
+  paginatorPresent: true
+};
+
+test('evaluateInvoicingUiHealth: healthy snapshot is healthy', () => {
+  const r = evaluateInvoicingUiHealth(healthySnapshot);
+  assert.equal(r.healthy, true);
+  assert.deepEqual(r.issues, []);
+});
+
+test('evaluateInvoicingUiHealth: genuinely empty backlog is healthy (no false alarm)', () => {
+  const r = evaluateInvoicingUiHealth({
+    kpiFilterButtonPresent: true,
+    needsActionCount: 0,
+    rowCount: 0,
+    firstRowColumns: null,
+    anyActionButton: false,
+    paginatorPresent: true
+  });
+  assert.equal(r.healthy, true);
+});
+
+test('evaluateInvoicingUiHealth: KPI filter button missing is a regression', () => {
+  const r = evaluateInvoicingUiHealth({ ...healthySnapshot, kpiFilterButtonPresent: false });
+  assert.equal(r.healthy, false);
+  assert.ok(r.issues.some(i => /KPI filter button not found/i.test(i)));
+});
+
+test('evaluateInvoicingUiHealth: count>0 but zero rows is a regression (the original failure mode)', () => {
+  const r = evaluateInvoicingUiHealth({
+    kpiFilterButtonPresent: true,
+    needsActionCount: 148,
+    rowCount: 0,
+    firstRowColumns: null,
+    anyActionButton: false,
+    paginatorPresent: true
+  });
+  assert.equal(r.healthy, false);
+  assert.ok(r.issues.some(i => /0 table rows matched/i.test(i)));
+});
+
+test('evaluateInvoicingUiHealth: missing expected column cells is a regression', () => {
+  const r = evaluateInvoicingUiHealth({
+    ...healthySnapshot,
+    firstRowColumns: ['invoiceNumber', 'customerSummary-name'] // no SO/balance/total/action
+  });
+  assert.equal(r.healthy, false);
+  assert.ok(r.issues.some(i => /missing expected columns/i.test(i)));
+  assert.ok(/salesOrderNumber/.test(r.issues.join(' ')));
+});
+
+test('evaluateInvoicingUiHealth: no action button when rows present is a regression', () => {
+  const r = evaluateInvoicingUiHealth({ ...healthySnapshot, anyActionButton: false });
+  assert.equal(r.healthy, false);
+  assert.ok(r.issues.some(i => /No Create\/Issue button/i.test(i)));
+});
+
+test('summary email raises a loud alert box + subject prefix on UI regression', () => {
+  const results = { processed: 0, sent: 0, skipped: 0, errors: 0, details: [] };
+  const fulcrumResults = {
+    processedInvoices: [],
+    errors: [],
+    stoppedEarly: false,
+    stopReason: null,
+    uiHealthCheck: {
+      healthy: false,
+      issues: ['KPI reports 148 NEEDS ACTION item(s) but 0 table rows matched (.cdk-row) — row selector likely broke'],
+      checks: {}
+    }
+  };
+  const { subject, body, emailContext } = buildSummaryEmailContent(results, fulcrumResults, {
+    now: new Date('2026-06-17T00:00:00Z'),
+    environmentLabel: 'PRODUCTION'
+  });
+  assert.match(subject, /FULCRUM UI REGRESSION/);
+  assert.match(body, /ALERT: FULCRUM INVOICING UI REGRESSION DETECTED/);
+  assert.match(body, /0 table rows matched/);
+  assert.equal(emailContext.fulcrum.uiRegression, true);
+  assert.ok(emailContext.fulcrum.uiHealthIssues.length >= 1);
+});
+
+test('summary email shows no UI alert when the guard is healthy', () => {
+  const results = { processed: 1, sent: 1, skipped: 0, errors: 0, details: [] };
+  const fulcrumResults = {
+    processedInvoices: [{ soNumber: '9291', balance: 10, total: 10, action: 'Created & Issued' }],
+    errors: [],
+    stoppedEarly: false,
+    stopReason: null,
+    uiHealthCheck: { healthy: true, issues: [], checks: {} }
+  };
+  const { subject, body, emailContext } = buildSummaryEmailContent(results, fulcrumResults, {
+    now: new Date('2026-06-17T00:00:00Z'),
+    environmentLabel: 'PRODUCTION'
+  });
+  assert.doesNotMatch(subject, /UI REGRESSION/);
+  assert.doesNotMatch(body, /ALERT: FULCRUM INVOICING UI REGRESSION/);
+  assert.equal(emailContext.fulcrum.uiRegression, false);
+});
+
+// ===== shouldProcessRow: never throws, skips non-actionable rows =====
+
+test('shouldProcessRow: refunds are always skipped', () => {
+  assert.equal(shouldProcessRow(100, 100, true, true, false), false);
+  assert.equal(shouldProcessRow(0, 100, true, false, true), false);
+});
+
+test('shouldProcessRow: Create rows need positive balance AND total', () => {
+  assert.equal(shouldProcessRow(100, 100, false, true, false), true);
+  assert.equal(shouldProcessRow(0, 100, false, true, false), false);
+  assert.equal(shouldProcessRow(100, 0, false, true, false), false);
+});
+
+test('shouldProcessRow: Issue rows need positive total', () => {
+  assert.equal(shouldProcessRow(0, 100, false, false, true), true);
+  assert.equal(shouldProcessRow(0, 0, false, false, true), false);
+});
+
+test('shouldProcessRow: a row with no action button is skipped, never throws (regression: SO2617 halted the stage)', () => {
+  let result;
+  assert.doesNotThrow(() => { result = shouldProcessRow(0, 36529.6, false, false, false); });
+  assert.equal(result, false);
 });

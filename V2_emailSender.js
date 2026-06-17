@@ -358,7 +358,18 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
     });
   }
 
+  // Fulcrum UI regression guard (set by fulcrumProcessor's one-time health check).
+  // A tripped guard means the invoicing-list selectors may be broken, so the
+  // scraper could be silently doing nothing — surface it loudly.
+  const uiHealth = fulcrumResults?.uiHealthCheck || null;
+  const uiRegression = !!uiHealth && uiHealth.healthy === false;
+  const uiIssues = uiRegression ? (uiHealth.issues || []).map(String) : [];
+
   const actionableSections = [
+    {
+      title: 'FULCRUM UI REGRESSION — invoicing page structure changed; scraper selectors may be broken (no/partial invoices processed)',
+      entries: uiIssues
+    },
     {
       title: 'Add customers to allowlist (these invoices were skipped because the customer is not yet approved to receive invoices)',
       entries: groupDetailsByCustomer(allowlistMissDetails).map(({ customer, invoices }) =>
@@ -396,7 +407,8 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
   ].filter(section => section.entries.length > 0);
 
   const actionItemCount = actionableSections.reduce((count, section) => count + section.entries.length, 0);
-  const subject = `Invoice Run Summary on ${dateStr} - ${results.sent} sent, ${actionItemCount} need attention [${formatMinutes(metrics.totalTime)}]`;
+  const subjectPrefix = uiRegression ? '⚠️ FULCRUM UI REGRESSION — ' : '';
+  const subject = `${subjectPrefix}Invoice Run Summary on ${dateStr} - ${results.sent} sent, ${actionItemCount} need attention [${formatMinutes(metrics.totalTime)}]`;
 
   const processedSoNumbers = (fulcrumResults?.processedInvoices || []).map(inv => `SO${inv.soNumber}`);
   const sentDetails = details.filter(d => d.status === 'sent');
@@ -418,17 +430,36 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
       processed: fulcrumResults.processedInvoices?.length ?? 0,
       errors: fulcrumResults.errors?.length ?? 0,
       stoppedEarly: !!fulcrumResults.stoppedEarly,
-      stopReason: fulcrumResults.stopReason || null
+      stopReason: fulcrumResults.stopReason || null,
+      uiRegression,
+      uiHealthIssues: uiIssues
     } : null
   };
 
-  const bodyLines = [
+  const bodyLines = [];
+
+  // Loud, can't-miss alert box at the very top when the UI regression guard trips.
+  if (uiRegression) {
+    bodyLines.push(
+      '!!=========================================================!!',
+      '!!  ALERT: FULCRUM INVOICING UI REGRESSION DETECTED        !!',
+      '!!=========================================================!!',
+      'The invoicing-list page structure changed, so the scraper\'s',
+      'selectors may be broken. Invoices may NOT have been processed',
+      'this run. Investigate fulcrumProcessor.js selectors (see specs/012).',
+      'Detected issues:'
+    );
+    uiIssues.forEach(issue => bodyLines.push(`  - ${issue}`));
+    bodyLines.push('!!=========================================================!!', '');
+  }
+
+  bodyLines.push(
     'Invoice Processing Summary',
     '==========================',
     `Date: ${now.toISOString()}`,
     `Environment: ${environmentLabel}`,
     ''
-  ];
+  );
 
   if (actionableSections.length > 0) {
     bodyLines.push('ACTION REQUIRED', '==============='); 

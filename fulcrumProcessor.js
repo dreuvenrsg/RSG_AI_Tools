@@ -514,6 +514,118 @@ async function logPageDiagnostics(page, context) {
   console.log(`[Debug] ${context}: ${JSON.stringify(diagnostics)}`);
 }
 
+// ===== Invoicing-list UI regression guard =====
+// Fulcrum has rebuilt the invoicing-list DOM before (the j-* component
+// redesign — see specs/012). This guard runs ONCE per run, right after the
+// NEEDS ACTION filter is applied, and checks that the selectors the scraper
+// depends on still resolve. If they don't, the run records a regression so the
+// summary email can raise a loud alert instead of the scraper silently
+// processing nothing (the exact way the j-* redesign failed for days).
+let uiHealthResult = null; // null = not yet checked this run
+
+// Pure decision function over a structural snapshot of the list page.
+// Exported for unit testing. Returns { healthy, issues, checks }.
+export function evaluateInvoicingUiHealth(snapshot = {}) {
+  const issues = [];
+  const expectedColumns = ['salesOrderNumber', 'salesOrderBalance', 'invoice-total', 'action'];
+
+  if (!snapshot.kpiFilterButtonPresent) {
+    issues.push('NEEDS ACTION KPI filter button not found (selector j-kpi-filter[label="Needs Action"] button)');
+  } else if (snapshot.needsActionCount === null || snapshot.needsActionCount === undefined) {
+    issues.push('Could not parse the NEEDS ACTION count from the KPI button text (KPI markup changed)');
+  }
+
+  const count = snapshot.needsActionCount;
+  // The exact failure mode of the last regression: the page renders but our row
+  // selector matches nothing while the KPI count says there ARE items to act on.
+  if (typeof count === 'number' && count > 0 && snapshot.rowCount === 0) {
+    issues.push(`KPI reports ${count} NEEDS ACTION item(s) but 0 table rows matched (.cdk-row) — row selector likely broke`);
+  }
+
+  if (snapshot.rowCount > 0) {
+    const cols = Array.isArray(snapshot.firstRowColumns) ? snapshot.firstRowColumns : [];
+    const missing = expectedColumns.filter(c => !cols.includes(c));
+    if (missing.length) {
+      issues.push(`Row cells missing expected columns: ${missing.map(c => '.cdk-column-' + c).join(', ')}`);
+    }
+    if (!snapshot.anyActionButton) {
+      issues.push('No Create/Issue button found in any row action cell (.cdk-column-action) — action button selector likely broke');
+    }
+    if (!snapshot.paginatorPresent) {
+      issues.push('Paginator not found (selector j-paginator) — pagination may be broken');
+    }
+  }
+
+  return {
+    healthy: issues.length === 0,
+    issues,
+    checks: {
+      kpiFilterButtonPresent: !!snapshot.kpiFilterButtonPresent,
+      needsActionCount: count ?? null,
+      rowCount: snapshot.rowCount ?? null,
+      paginatorPresent: !!snapshot.paginatorPresent,
+      anyActionButton: !!snapshot.anyActionButton
+    }
+  };
+}
+
+// Gather the structural snapshot from the live invoicing list.
+async function collectInvoicingUiSnapshot(page) {
+  return page.evaluate(() => {
+    const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+    const kpiBtn = document.querySelector('j-kpi-filter[label="Needs Action"] button');
+    const kpiText = kpiBtn ? norm(kpiBtn.textContent) : '';
+    const m = kpiText.match(/needs action\s+([\d,]+)/i);
+    const needsActionCount = m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    const rows = Array.from(document.querySelectorAll('.cdk-row'));
+    const firstRow = rows[0] || null;
+    const firstRowColumns = firstRow
+      ? Array.from(firstRow.querySelectorAll('[class*="cdk-column-"]'))
+          .map(c => (String(c.className).match(/cdk-column-([A-Za-z-]+?)(?:\s|$)/) || [])[1])
+          .filter(Boolean)
+      : null;
+    const anyActionButton = rows.some(r => {
+      const cell = r.querySelector('.cdk-column-action') || r;
+      return Array.from(cell.querySelectorAll('button')).some(b => {
+        const t = norm(b.textContent);
+        return t === 'Create' || t === 'Issue';
+      });
+    });
+    return {
+      kpiFilterButtonPresent: !!kpiBtn,
+      needsActionCount,
+      rowCount: rows.length,
+      firstRowColumns,
+      anyActionButton,
+      paginatorPresent: !!document.querySelector('j-paginator')
+    };
+  });
+}
+
+// Run the health check at most once per run (guarded by the module-level flag).
+function resetUiHealthCheck() { uiHealthResult = null; }
+function getUiHealthResult() { return uiHealthResult; }
+async function runUiHealthCheckOnce(page) {
+  if (uiHealthResult !== null) return uiHealthResult;
+  try {
+    const snapshot = await collectInvoicingUiSnapshot(page);
+    uiHealthResult = evaluateInvoicingUiHealth(snapshot);
+    if (uiHealthResult.healthy) {
+      console.log(`[UICheck] Invoicing list UI healthy: ${JSON.stringify(uiHealthResult.checks)}`);
+    } else {
+      console.error(`[UICheck] ⚠️ Invoicing list UI REGRESSION: ${JSON.stringify(uiHealthResult.issues)}`);
+    }
+  } catch (error) {
+    uiHealthResult = {
+      healthy: false,
+      issues: [`UI health check could not run: ${error.message}`],
+      checks: {}
+    };
+    console.error(`[UICheck] health check errored: ${error.message}`);
+  }
+  return uiHealthResult;
+}
+
 async function waitForInvoicingPageReady(page) {
   try {
     await page.waitForFunction(() => {
@@ -664,6 +776,11 @@ async function clickNeedsAction(page) {
   await waitForTableStable(page, { stabilityDuration: 500 });
   smartWaitTracker.recordSaving('needsAction', config.timeouts.pageStabilization - 500);
   console.log('[Nav] NEEDS ACTION clicked');
+
+  // One-time UI regression guard: with the filtered list now loaded, verify the
+  // selectors the scraper depends on still resolve. Runs once per run (guarded
+  // by the module-level flag); cheap no-op on later calls.
+  await runUiHealthCheckOnce(page);
 }
 
 // Verify NEEDS ACTION filter is active
@@ -814,8 +931,13 @@ async function extractRowData(row) {
   }
 }
 
-// CUSTOMIZE THIS: Your business logic for which invoices to process
-function shouldProcessRow(balance, total, hasRefund, hasCreate, hasIssue) {
+// Business logic for which invoices to process. Exported for unit testing.
+// IMPORTANT: this must never throw. A row with no recognized action button
+// (neither Create nor Issue — e.g. a transiently-rendered row, a $0 row in an
+// odd state, or a future UI tweak) must simply be SKIPPED. Throwing here used
+// to bubble up through processPage and abort the entire Fulcrum stage on a
+// single weird row (observed on SO2617), so one bad row could halt the run.
+export function shouldProcessRow(balance, total, hasRefund, hasCreate, hasIssue) {
   // Skip refunds
   if (hasRefund){
     return false;
@@ -824,7 +946,8 @@ function shouldProcessRow(balance, total, hasRefund, hasCreate, hasIssue) {
   } else if (hasIssue){
     return total > 0
   } else {
-    throw new Error('Weird edge case in shouldProcessRow, balance, total, hasRefund, hasCreate, and hasIssue, respectively: ', balance, total, hasRefund, hasCreate, hasIssue);
+    // No actionable button on this row — skip it rather than crashing the run.
+    return false;
   }
 }
 
@@ -926,7 +1049,33 @@ async function runCreateWorkflow(page, row, rowData, targetPageNum, detailTimeou
   await returnToNeedsActionPage(page, targetPageNum);
 }
 
-// Process a row with "Create" button (Create → Issue workflow)
+// Read which action a row currently exposes: 'Create', 'Issue', or null.
+// Used during timeout recovery to tell whether a timed-out CREATE actually
+// created the draft (the row then shows 'Issue') vs. still needs creating.
+async function getRowAction(row) {
+  try {
+    return await row.evaluate(el => {
+      const scope = el.querySelector('.cdk-column-action') || el;
+      const texts = Array.from(scope.querySelectorAll('button')).map(b => b.textContent.trim());
+      if (texts.includes('Create')) return 'Create';
+      if (texts.includes('Issue')) return 'Issue';
+      return null;
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+// Process a row with "Create" button (Create → Issue workflow).
+//
+// Retry model (see specs/012 "Timeout / retry behavior"): timeout-style errors
+// are retried up to maxAttempts with extended waits, but a retry is
+// RECOVER-THEN-DECIDE, never a blind re-run — a timeout often fires AFTER the
+// draft was already created, so re-running CREATE could create a duplicate
+// invoice. After a timeout we return to the list, re-find the row, and act on
+// its CURRENT state: gone → assume done; now an "Issue" row → finish via the
+// ISSUE workflow; still a "Create" row → genuinely re-run CREATE. Non-timeout
+// errors are not retried.
 async function processCreate(page, row, rowData, errors, targetPageNum) {
   console.log(`[Row] Processing CREATE for ${rowData.soNumber}...`);
 
@@ -974,6 +1123,20 @@ async function processCreate(page, row, rowData, errors, targetPageNum) {
           console.log(`[Row] ${rowData.soNumber} no longer appears in NEEDS ACTION after timeout recovery; assuming prior CREATE succeeded`);
           return true;
         }
+
+        // A timed-out CREATE may have already created the draft, in which case
+        // the row now shows an "Issue" button. Retrying CREATE would fail with
+        // "Create button not found", so finish the job via the ISSUE workflow.
+        const currentAction = await getRowAction(currentRow);
+        if (currentAction === 'Issue') {
+          console.log(`[Row] ${rowData.soNumber} now shows an Issue button after CREATE timeout — draft exists; completing via ISSUE workflow`);
+          return await processIssue(page, currentRow, rowData, errors, targetPageNum);
+        }
+        if (currentAction !== 'Create') {
+          console.log(`[Row] ${rowData.soNumber} has no Create/Issue action after CREATE timeout (action="${currentAction}"); assuming it completed`);
+          return true;
+        }
+        // Still a Create row → loop continues and retries the CREATE workflow.
       } catch (recoveryError) {
         const errorMsg = `Failed CREATE for ${rowData.soNumber}: ${error.message} (retry recovery failed: ${recoveryError.message})`;
         console.error(`[Row] ${errorMsg}`);
@@ -990,7 +1153,7 @@ async function processCreate(page, row, rowData, errors, targetPageNum) {
 async function processIssue(page, row, rowData, errors, targetPageNum) {
   console.log(`[Row] Processing ISSUE for ${rowData.soNumber}...`);
 
-  const maxRetries = 2;  // Allow up to 2 attempts for ISSUE workflow
+  const maxRetries = 3;  // Revisit a timed-out ISSUE a few times (matches CREATE)
   let currentRow = row;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1004,7 +1167,9 @@ async function processIssue(page, row, rowData, errors, targetPageNum) {
       return true;
 
     } catch (error) {
-      const isTimeout = error.message.includes('timeout') || error.message.includes('Timeout');
+      // Use the same broad timeout matcher as CREATE so element-wait failures
+      // ("Waiting failed: …exceeded") are retried, not just navigation timeouts.
+      const isTimeout = isCreateDetailTimeoutError(error);
 
       if (!isTimeout || attempt >= maxRetries) {
         const errorMsg = `Failed ISSUE for ${rowData.soNumber}: ${error.message}`;
@@ -1169,6 +1334,17 @@ async function processPage(page, processedInvoices, errors, processedSOSet, limi
           const scope = el.querySelector('.cdk-column-action') || el;
           return Array.from(scope.querySelectorAll('button')).some(btn => btn.textContent.trim() === 'Issue');
         });
+
+        // Diagnostic: a non-refund row with no recognized action button is
+        // unusual (transient render, odd $0 state, or an action-cell UI change).
+        // Log the action-cell text so we can tell a genuine no-action row from a
+        // selector miss, without halting the run.
+        if (!hasCreate && !hasIssue && !rowData.hasRefund) {
+          const actionCellText = await row.evaluate(el =>
+            (el.querySelector('.cdk-column-action')?.textContent || '(no .cdk-column-action cell)').replace(/\s+/g, ' ').trim()
+          ).catch(() => '(unreadable)');
+          console.warn(`[Process] ${rowData.soNumber} has no Create/Issue action button (balance=$${rowData.balance}, total=$${rowData.total}); action cell="${actionCellText}". Skipping.`);
+        }
 
         // Check if we should process
         if (!shouldProcessRow(rowData.balance, rowData.total, rowData.hasRefund, hasCreate, hasIssue)) {
@@ -1446,6 +1622,7 @@ export async function runFulcrumProcessor(username, password, headless = true, o
   const errors = [];
   const processedSOSet = new Set(); // Track processed SO numbers to prevent duplicates
   const limits = createProcessingLimits(options);
+  resetUiHealthCheck(); // clear the once-per-run UI regression guard
   const state = {
     actionAttempts: 0,
     stopReason: null
@@ -1537,9 +1714,10 @@ export async function runFulcrumProcessor(username, password, headless = true, o
       stoppedEarly: !!state.stopReason,
       stopReason: state.stopReason,
       actionAttempts: state.actionAttempts,
-      pagesVisited: pageCount
+      pagesVisited: pageCount,
+      uiHealthCheck: getUiHealthResult()
     };
-    
+
   } catch (error) {
     console.error('\n[Main] FATAL ERROR:', error.message);
     errors.push(`Fatal error: ${error.message}`);
@@ -1552,9 +1730,10 @@ export async function runFulcrumProcessor(username, password, headless = true, o
       stoppedEarly: !!state.stopReason,
       stopReason: state.stopReason,
       actionAttempts: state.actionAttempts,
-      pagesVisited: pageCount
+      pagesVisited: pageCount,
+      uiHealthCheck: getUiHealthResult()
     };
-    
+
   } finally {
     // Report smart wait savings
     const smartWaitSummary = smartWaitTracker.getSummary();
