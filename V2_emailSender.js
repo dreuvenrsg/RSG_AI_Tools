@@ -2276,12 +2276,18 @@ async function waitForFulcrumQboSync(fulcrumResults) {
 // Run the Fulcrum stage via either the proven browser-click path (default) or
 // the API path (FULCRUM_API_MODE). API mode logs in for the session, then
 // discovers + creates + issues via HTTP — no clicking/Blazor waits. See specs/013.
-async function runFulcrumStage(username, password, headless, options) {
-  if (process.env.FULCRUM_API_MODE) {
+async function runFulcrumStage(username, password, headless, options, {
+  apiMode = !!process.env.FULCRUM_API_MODE,
+  dryRun = !!process.env.FULCRUM_API_DRY_RUN,
+} = {}) {
+  // apiMode/dryRun default to env but can be overridden per-invocation (e.g. a
+  // Lambda event {fulcrumApiMode:true}) so the API path can be exercised once in
+  // prod without making it the standing default.
+  if (apiMode) {
     const apiKey = await getFulcrumApiKey();
     return runFulcrumApiMode(username, password, apiKey, {
       headless,
-      dryRun: !!process.env.FULCRUM_API_DRY_RUN,
+      dryRun,
       maxActions: options?.maxActionAttempts ?? null,
     });
   }
@@ -2621,13 +2627,16 @@ export const handler = async (event, context) => {
     } else {
       try {
         const fulcrumRunOptions = buildFulcrumRunOptions(event, context);
-        console.log('[Fulcrum] Run options:', JSON.stringify(fulcrumRunOptions), 'apiMode:', !!process.env.FULCRUM_API_MODE);
+        const fulcrumApiMode = event?.fulcrumApiMode ?? !!process.env.FULCRUM_API_MODE;
+        const fulcrumApiDryRun = event?.fulcrumApiDryRun ?? !!process.env.FULCRUM_API_DRY_RUN;
+        console.log('[Fulcrum] Run options:', JSON.stringify(fulcrumRunOptions), 'apiMode:', fulcrumApiMode, 'dryRun:', fulcrumApiDryRun);
         logger.startStage('fulcrum');
         fulcrumResults = await runFulcrumStage(
           fulcrumUsername,
           fulcrumPassword,
           true, // headless mode for Lambda
-          fulcrumRunOptions
+          fulcrumRunOptions,
+          { apiMode: fulcrumApiMode, dryRun: fulcrumApiDryRun }
         );
         logger.endStage('fulcrum');
 

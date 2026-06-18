@@ -171,10 +171,16 @@ Bearer). Proceed to build (Phase 2) behind a flag with dry-run + browser fallbac
       `/rsg-ai/prod/fulcrum-api-key`. Verified: dry-run wrapper (45 create
       planned, parity held, email builds) + live `maxActions=3` batch
       (SO9812/9827/9823 issued, QBO 223800/223801/sync, 0 errors). Tests 91/91.
-- [ ] Enablement: set `FULCRUM_API_MODE=1` on the Lambda (start with
-      `FULCRUM_MAX_ACTIONS` capped + watch logs) once comfortable; then consider
-      making it the default and Phase 3 (drop Chromium if create can avoid the
-      browser session).
+- [x] Enablement: prod-verified 2026-06-17 — triggered the Lambda with a capped
+      API-mode event (`{fulcrumApiMode:true, fulcrumMaxActionAttempts:5}`); it ran
+      `runFulcrumApiMode` in headless-Lambda Chromium (login + plan fetch + SSM
+      key load via the new IAM grant), QBO-sent, and emailed the summary, clean.
+      Then set **`FULCRUM_API_MODE: '1'` in `template.yaml` (uncapped — no
+      `FULCRUM_MAX_ACTIONS`)**, so the nightly run now uses the API path and
+      processes everything. Revert by setting it to `''`. A per-invocation event
+      override (`fulcrumApiMode`/`fulcrumApiDryRun`) exists for one-off control.
+- [ ] Phase 3 (optional): drop Chromium if create can avoid the browser session
+      (issue is already browser-free; create still needs the session cookie).
 - [ ] Extend the UI/health-alert idea to the API (loud alert on unexpected
       HTTP status / shape change), analogous to specs/012's guard.
 - [ ] Phase 3 (optional): server-side stage, remove Chromium from `template.yaml`.

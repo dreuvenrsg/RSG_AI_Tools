@@ -15,6 +15,10 @@ Globals:
         deploy_region: !Ref DeployRegion   # ← your custom var stays
         INVOICE_PROCESSOR_LOCK_TABLE: !Ref InvoiceProcessorLockTable
         INVOICE_PROCESSOR_LOCK_NAME: rsg-invoice-processor
+        # Fulcrum stage uses the API path (specs/013) — uncapped, processes all
+        # actionable invoices. Verified in prod 2026-06-17. Set to '' to revert
+        # to the browser-click path. No FULCRUM_MAX_ACTIONS = no cap.
+        FULCRUM_API_MODE: '1'
     EphemeralStorage:
       Size: 2048
 
