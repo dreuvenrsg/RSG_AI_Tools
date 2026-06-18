@@ -179,8 +179,17 @@ Bearer). Proceed to build (Phase 2) behind a flag with dry-run + browser fallbac
       `FULCRUM_MAX_ACTIONS`)**, so the nightly run now uses the API path and
       processes everything. Revert by setting it to `''`. A per-invocation event
       override (`fulcrumApiMode`/`fulcrumApiDryRun`) exists for one-off control.
-- [ ] Phase 3 (optional): drop Chromium if create can avoid the browser session
-      (issue is already browser-free; create still needs the session cookie).
+- [~] Phase 3 (drop Chromium) — investigated 2026-06-17, **blocked**: the public
+      Bearer API has **no invoice-create endpoint** (exhaustive swagger scan).
+      `PUT /api/invoices/{id}` (UpdateInvoice) only patches `externalReferences`
+      (its `InvoiceUpdateDto` has just that one property); there's no
+      `POST /api/invoices`, no sales-order→invoice op (only quote→SO). So **create
+      requires the internal cookie-authed `CreateInvoiceFromSalesOrderCommand`**,
+      i.e. the browser login is unavoidable for create (issue is already
+      browser-free via the Bearer API). Only way to drop Chromium would be to
+      replicate the ASP.NET-antiforgery HTTP login (fragile/undocumented) — not
+      worth it since browser login is no longer the bottleneck. Revisit only if
+      Fulcrum adds a public create endpoint or infra/cold-start cost forces it.
 - [ ] Extend the UI/health-alert idea to the API (loud alert on unexpected
       HTTP status / shape change), analogous to specs/012's guard.
 - [ ] Phase 3 (optional): server-side stage, remove Chromium from `template.yaml`.
