@@ -27,7 +27,7 @@ add, remove, or repurpose a file, update its entry in the same PR.
 |---|---|
 | `V2_emailSender.js` | Lambda handler/orchestrator: QBO OAuth, invoice fetching, shipping validation via Fulcrum, customer routing rules, SES summary emails, DynamoDB run lock, monthly mis-route audit |
 | `fulcrumProcessor.js` | Puppeteer browser automation: logs into Fulcrum, processes "NEEDS ACTION" invoices |
-| `fulcrumInvoiceApi.js` | Fulcrum invoicing via the app HTTP API (specs/013): fetch + classify the Needs Action list (reuses `shouldProcessRow` for skip parity); discovery half of the browser→API migration |
+| `fulcrumInvoiceApi.js` | Fulcrum invoicing via the app HTTP API (specs/013): fetch + classify the Needs Action list (reuses `shouldProcessRow` for skip parity); create/issue primitives; captures each issued invoice's DocNumber (`fulcrumInvoiceDocNumber`) for QBO sync/reconciliation (specs/015) |
 | `layers/chromium/nodejs/package.json` | Chromium Lambda-layer manifest |
 
 ## Accounting tools + RSG AI agent (`src/`)
@@ -101,8 +101,11 @@ add, remove, or repurpose a file, update its entry in the same PR.
 | `specs/008-chat-debugging-logs.md` | chatId-tagged logs, CloudWatch durability, and the agent's log-search tool |
 | `specs/009-zendesk-ticket-search.md` | Vectorize Zendesk tickets (pgvector + OpenAI); webhook + reconcile ingestion; semantic search tool |
 | `specs/010-customer-service-ticket-agent.md` | The `ticket-agent/` subsystem: agent-first Zendesk ticket classification, drafting, and the deterministic PO pipeline (moved from CSDroid) |
+| `specs/011-shipment-same-date-guard-blocks-invoices.md` | Same-date shipment guard in `chooseShipment()` throws before matching runs, permanently blocking valid invoices (e.g. SO9400/F10268); operational fix + code reorder |
 | `specs/012-fulcrum-invoicing-list-ui-migration.md` | Fulcrum's invoicing-list redesign (`j-*` components) broke `fulcrumProcessor.js`; old→new selector map + list-page migration (detail/create/issue workflow unchanged) |
 | `specs/013-fulcrum-invoicing-via-api-not-browser.md` | Plan to drive Fulcrum invoicing via its HTTP API (list/create/issue) instead of Puppeteer DOM scraping + clicks; confirmed read endpoint, staged write path |
+| `specs/014-tracking-optional-will-call-orders.md` | Customer-pickup ("Will Call") orders have no carrier tracking; explicit (customer, method) allowlist records the shipping-method name in `TrackingNum` instead of hard-failing the send |
+| `specs/015-fulcrum-qbo-sync-gap-reconciliation.md` | Just-issued invoices synced to QBO too late to be sent and vanished silently (F10488/F10489); poll-until-synced by DocNumber + issued-vs-sent reconciliation that flags any gap in ACTION REQUIRED |
 
 ## ticket-agent/ (Zendesk customer-service subsystem)
 

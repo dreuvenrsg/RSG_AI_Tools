@@ -1375,6 +1375,11 @@ async function processPage(page, processedInvoices, errors, processedSOSet, limi
         processedSOSet.add(rowData.soNumber);
 
         if (success) {
+          // NOTE: browser mode does not capture the resulting invoice DocNumber
+          // (no invoiceNumber field), so the QBO stage's DocNumber sync-poll +
+          // issued-vs-sent reconciliation degrade to the legacy fixed wait here.
+          // API mode (the prod default) captures it. See fulcrumInvoiceApi.js and
+          // waitForFulcrumQboSync/reconcileIssuedVsSent in V2_emailSender.js.
           processedInvoices.push({
             soNumber: rowData.soNumber,
             balance: rowData.balance,
@@ -1580,6 +1585,8 @@ async function runFulcrumWorker(workerId, page, shared, username, password) {
         ? await processCreate(page, claim.row, claim.rowData, shared.errors, claim.pageNum)
         : await processIssue(page, claim.row, claim.rowData, shared.errors, claim.pageNum);
       if (ok) {
+        // No invoiceNumber here (browser mode) — see the note on the serial path
+        // above; the QBO sync-poll/reconciliation fall back to the fixed wait.
         shared.processedInvoices.push({
           soNumber: claim.rowData.soNumber,
           balance: claim.rowData.balance,

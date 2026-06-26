@@ -213,7 +213,8 @@ const config = {
     'WORLD SECURITY & CONTROL,INC.',
     'Empire Fire Alarm Specialist Co., Inc',
     'HOCHIKI',
-    'ANIXTER'
+    'ANIXTER',
+    'ANIXTER CANADA INC.'
   ]
 };
 
@@ -366,6 +367,14 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
   const uiRegression = !!uiHealth && uiHealth.healthy === false;
   const uiIssues = uiRegression ? (uiHealth.issues || []).map(String) : [];
 
+  // Reconcile invoices issued in Fulcrum this run vs what the QBO stage handled.
+  // Catches the silent gap where a just-issued invoice synced to QBO too late to
+  // be fetched by the send stage — otherwise it vanishes from this summary.
+  const reconciliation = reconcileIssuedVsSent({
+    processedInvoices: fulcrumResults?.processedInvoices || [],
+    details
+  });
+
   const actionableSections = [
     {
       title: 'FULCRUM UI REGRESSION — invoicing page structure changed; scraper selectors may be broken (no/partial invoices processed)',
@@ -404,6 +413,12 @@ function buildSummaryEmailContent(results, fulcrumResults = null, { now = new Da
     {
       title: 'Fulcrum issues',
       entries: (fulcrumResults?.errors || []).map(error => String(error))
+    },
+    {
+      title: 'Investigate invoices issued in Fulcrum but NOT sent by QBO this run (likely synced to QBO too late to be picked up — they should send next run; verify or send manually)',
+      entries: reconciliation.missing.map(m =>
+        `${m.invoiceNumber}${m.soNumber ? ` (${m.soNumber})` : ''}: issued in Fulcrum, not found in QBO send stage`
+      )
     }
   ].filter(section => section.entries.length > 0);
 
@@ -875,6 +890,32 @@ const invoiceModule = {
                 `${unsentUnpaid.length} are unsent with balance > 0`);
     return unsentUnpaid;
   },
+  // Targeted lookup for the Fulcrum→QBO sync poll: which of these DocNumbers are
+  // already visible in QBO right now? Returns a Set of normalized (digits-only)
+  // DocNumbers. Filters server-side via DocNumber IN (...), so it's far cheaper
+  // than the 30-day paged scan getUnsentUnpaidInvoices does. Chunked to keep the
+  // IN-list small.
+  async findInvoicesByDocNumbers(docNumbers = []) {
+    const present = new Set();
+    const cleaned = [...new Set((docNumbers || [])
+      .map(d => (d === undefined || d === null) ? '' : String(d).trim())
+      .filter(Boolean))];
+    if (!cleaned.length) return present;
+    const chunkSize = 20;
+    for (let i = 0; i < cleaned.length; i += chunkSize) {
+      const inList = cleaned.slice(i, i + chunkSize)
+        .map(d => `'${d.replace(/'/g, "''")}'`)
+        .join(', ');
+      const { Invoice = [] } = await qboAPI.query(
+        `SELECT DocNumber FROM Invoice WHERE DocNumber IN (${inList})`
+      );
+      for (const inv of Invoice) {
+        const norm = normalizeDocNumber(inv.DocNumber);
+        if (norm) present.add(norm);
+      }
+    }
+    return present;
+  },
   async getJCIFireProtectionInvoices({ windowDays = 720 } = {}) {
     console.log("[Invoice] Fetching invoices (paged, limited by recent window, then filtering in JS)...");
 
@@ -1214,6 +1255,76 @@ const utils = {
   }
 };
 
+// ===========================================================================
+// Tracking-optional shipping rules
+// ===========================================================================
+// Some orders legitimately ship without a carrier tracking number — most
+// commonly customer-pickup / "Will Call" shipments, where the customer (or
+// their freight forwarder) collects the goods, so no carrier number ever
+// exists. Our send pipeline otherwise treats a missing tracking number as a
+// hard error (see externalDataModule.fetchExternalDataForInvoice), which would
+// block these invoices on every run forever. To let them go out, we record the
+// shipping-method name itself (e.g. "Will Call") in QBO's TrackingNum field.
+//
+// This is deliberately an explicit allowlist, NOT a blanket "skip tracking when
+// Will Call" rule: we only relax the requirement for specific
+// (customer, shipping-method) pairs we've confirmed are genuine pickups. To
+// extend it to another customer or method, add an entry to
+// TRACKING_OPTIONAL_RULES below — no other code changes are needed.
+
+/**
+ * @typedef {Object} TrackingOptionalRule
+ * @property {string} label                                Human-readable description (for logs/maintenance).
+ * @property {(customerNameLower: string) => boolean} customerMatches
+ *           Receives the lower-cased customer name; return true if the rule applies.
+ * @property {string[]} shippingMethods                    Lower-cased shipping-method names allowed to ship without tracking.
+ */
+
+/** @type {TrackingOptionalRule[]} */
+const TRACKING_OPTIONAL_RULES = [
+  {
+    label: 'HLI Solutions pickup (San Diego freight forwarder / Christiansburg will-call)',
+    customerMatches: (name) => name.includes('hli solutions'),
+    shippingMethods: ['will call'],
+  },
+];
+
+/**
+ * If an order is allowed to ship without a carrier tracking number, returns the
+ * placeholder to store in QBO's TrackingNum field — the shipping-method name in
+ * its original casing (e.g. "Will Call"). Returns null when no rule applies.
+ * Pure + exported for tests.
+ */
+function trackingPlaceholderForOrder({ customerName, shipMethodName }) {
+  const nameLower = (customerName || '').toLowerCase();
+  const method = (shipMethodName || '').trim();
+  const methodLower = method.toLowerCase();
+  if (!methodLower) return null;
+
+  const matched = TRACKING_OPTIONAL_RULES.some(
+    (rule) => rule.customerMatches(nameLower) && rule.shippingMethods.includes(methodLower)
+  );
+  return matched ? method : null;
+}
+
+/**
+ * Resolve the tracking number to record on a QBO invoice from the chosen Fulcrum
+ * shipment. Normally this is the shipment's carrier tracking number. When the
+ * shipment has none, falls back to a method-name placeholder for orders that
+ * legitimately ship without tracking (see TRACKING_OPTIONAL_RULES). Returns null
+ * when no tracking can be determined — callers treat null as a hard error.
+ * Pure + exported so the behavior is covered by tests/invoiceSender.test.js.
+ */
+function resolveTrackingNumber({ bestShipment, customerName, shipMethodName }) {
+  const direct =
+    bestShipment?.trackingNumber ||
+    (Array.isArray(bestShipment?.trackingNumbers) ? bestShipment.trackingNumbers.find(Boolean) : null) ||
+    null;
+  if (direct) return direct;
+
+  return trackingPlaceholderForOrder({ customerName, shipMethodName });
+}
+
 // ===========================
 // External Data Module - Fulcrum Integration (v3 shipments)
 // ===========================
@@ -1288,18 +1399,18 @@ const externalDataModule = {
     //   console.log(`[Fulcrum] Chosen shipment ${bestShipment.number} (${bestShipment.id}), shipDate=${bestShipment.shipDate}`);
 
       // 4) Build return payload for QBO update
-      const trackingNumber =
-        bestShipment.trackingNumber ||
-        (Array.isArray(bestShipment.trackingNumbers) ? bestShipment.trackingNumbers.find(Boolean) : null) ||
-        null;
+      const shipDate = bestShipment.shippedDate || null;
+      const shipMethodName = bestShipment.shippingMethod?.name || bestShipment.shippingMethodName || null;
+
+      // HLI "Will Call" pickup orders have no carrier tracking number; for HLI we
+      // record "Will Call" as the tracking number rather than hard-failing the send.
+      const customerName = invoice?.CustomerRef?.name || '';
+      const trackingNumber = resolveTrackingNumber({ bestShipment, customerName, shipMethodName });
 
       if(!trackingNumber){
         console.log(`[Fulcrum] Could not determine a trackingNumber: QBO Invoice Id: ${invoice.Id} /QBO Invoice: ${invoice.DocNumber} /Sales OrderId in Fulcrum:${salesOrderId}}`);
         throw({message: `[Fulcrum] Could not determine a trackingNumber: QBO Invoice Id: ${invoice.Id} /QBO Invoice: ${invoice.DocNumber} /Sales OrderId in Fulcrum:${salesOrderId}}`});
       }
-
-      const shipDate = bestShipment.shippedDate || null;
-      const shipMethodName = bestShipment.shippingMethod?.name || bestShipment.shippingMethodName || null;
 
       const customerPONumber = fulcrumInvoice?.customerPONumber || null;
       
@@ -2141,7 +2252,13 @@ export {
   buildInvocationLockMetadata,
   resolveAuditRange,
   buildAuditReportEmail,
-  buildAuditAllClearEmail
+  buildAuditAllClearEmail,
+  resolveTrackingNumber,
+  trackingPlaceholderForOrder,
+  TRACKING_OPTIONAL_RULES,
+  reconcileIssuedVsSent,
+  normalizeDocNumber,
+  waitForFulcrumQboSync
 };
 
 // ---- utils: dates (add once) ----
@@ -2252,6 +2369,46 @@ function parsePositiveIntegerOption(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+// Reduce a DocNumber / Fulcrum invoice number to its bare digits so the QBO side
+// ("F10488") and the Fulcrum side ("F10488") compare equal regardless of prefix
+// or case drift. Returns null when there are no digits.
+function normalizeDocNumber(value) {
+  if (value === undefined || value === null) return null;
+  const digits = String(value).replace(/\D/g, '');
+  return digits ? digits : null;
+}
+
+// Reconcile invoices issued in the Fulcrum stage this run against what the QBO
+// send stage actually handled. Returns the issued invoices that QBO never even
+// fetched — neither sent, skipped, nor errored — which is the silent-gap case
+// where a just-issued invoice synced to QBO too late to be picked up (e.g.
+// F10488/F10489 on 2026-06-23). Invoices that WERE fetched and then skipped or
+// errored are already surfaced by other ACTION REQUIRED sections, so they count
+// as "accounted for" here. Issued invoices with no captured DocNumber (browser
+// mode) can't be matched precisely and are reported as unreconciledCount, not
+// flagged (a count compare is unreliable — the QBO query spans a 30-day window
+// that includes invoices from prior runs). Pure + exported for unit testing.
+function reconcileIssuedVsSent({ processedInvoices = [], details = [] } = {}) {
+  const accounted = new Set(
+    (details || []).map(d => normalizeDocNumber(d && d.invoiceNumber)).filter(Boolean)
+  );
+  const missing = [];
+  let unreconciledCount = 0;
+  for (const inv of (processedInvoices || [])) {
+    if (!inv || inv.dryRun) continue;
+    const norm = normalizeDocNumber(inv.invoiceNumber);
+    if (!norm) { unreconciledCount++; continue; }
+    if (!accounted.has(norm)) {
+      missing.push({
+        invoiceNumber: inv.invoiceNumber,
+        soNumber: inv.soNumber || null,
+        action: inv.action || null
+      });
+    }
+  }
+  return { missing, unreconciledCount };
+}
+
 // Load the Fulcrum public API key for FULCRUM_API_MODE (env or SSM, mirroring
 // src/fulcrum/client.js). Only called when API mode is enabled.
 async function getFulcrumApiKey() {
@@ -2262,15 +2419,60 @@ async function getFulcrumApiKey() {
 
 // After the Fulcrum stage issues invoices, the Fulcrum→QBO sync is async — a
 // just-issued invoice isn't immediately visible to the QBO send stage's
-// "unsent unpaid" query, so it would slip to the next run. Give the sync a short
-// window to register before the QBO stage runs. Skipped when nothing was issued.
-// Override the delay with FULCRUM_QBO_SYNC_WAIT_MS (default 20000).
+// "unsent unpaid" query, so it would slip to the next run (the silent gap that
+// dropped F10488/F10489 on 2026-06-23).
+//
+// Precise path (API mode, prod default): we captured each issued invoice's
+// DocNumber, so poll QBO until every one of them is visible to the send query,
+// then proceed — they send THIS run. The poll re-checks every
+// FULCRUM_QBO_SYNC_WAIT_MS (default 20000) up to FULCRUM_QBO_SYNC_MAX_WAIT_MS
+// (default 120000); on timeout we proceed anyway and reconcileIssuedVsSent flags
+// whatever stayed unsent (loud, not silent).
+//
+// Fallback path (browser mode / no DocNumbers captured): degrade to the legacy
+// single fixed wait of FULCRUM_QBO_SYNC_WAIT_MS. Skipped when nothing was issued.
 async function waitForFulcrumQboSync(fulcrumResults) {
-  const issued = fulcrumResults?.processedInvoices?.length || 0;
+  const processed = fulcrumResults?.processedInvoices || [];
+  const issued = processed.length;
   if (issued <= 0) return;
-  const ms = parsePositiveIntegerOption(process.env.FULCRUM_QBO_SYNC_WAIT_MS, 20000);
-  console.log(`[Sync] Waiting ${Math.round(ms / 1000)}s for Fulcrum→QBO sync of ${issued} issued invoice(s) before QBO send...`);
-  await new Promise((resolve) => setTimeout(resolve, ms));
+
+  const intervalMs = parsePositiveIntegerOption(process.env.FULCRUM_QBO_SYNC_WAIT_MS, 20000);
+  const maxWaitMs = parsePositiveIntegerOption(process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS, 120000);
+
+  const expectedRaw = [...new Set(processed
+    .map(p => (p && p.invoiceNumber != null) ? String(p.invoiceNumber).trim() : '')
+    .filter(Boolean))];
+
+  // No DocNumbers to poll on → legacy fixed wait.
+  if (!expectedRaw.length) {
+    console.log(`[Sync] Waiting ${Math.round(intervalMs / 1000)}s for Fulcrum→QBO sync of ${issued} issued invoice(s) before QBO send (no invoice numbers captured — fixed wait)...`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    return;
+  }
+
+  const expectedNorm = [...new Set(expectedRaw.map(normalizeDocNumber).filter(Boolean))];
+  const deadline = Date.now() + maxWaitMs;
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    let present = new Set();
+    try {
+      present = await invoiceModule.findInvoicesByDocNumbers(expectedRaw);
+    } catch (err) {
+      console.log(`[Sync] DocNumber poll query failed (attempt ${attempt}): ${err.message}`);
+    }
+    const missing = expectedNorm.filter(d => !present.has(d));
+    if (missing.length === 0) {
+      console.log(`[Sync] All ${expectedNorm.length} issued invoice(s) visible in QBO after ${attempt} check(s); proceeding to QBO send.`);
+      return;
+    }
+    if (Date.now() >= deadline) {
+      console.log(`[Sync] Timed out after ~${Math.round(maxWaitMs / 1000)}s: ${missing.length}/${expectedNorm.length} issued invoice(s) not yet in QBO. Proceeding; reconciliation will flag any that stay unsent.`);
+      return;
+    }
+    console.log(`[Sync] ${missing.length}/${expectedNorm.length} issued invoice(s) not yet synced to QBO; waiting ${Math.round(intervalMs / 1000)}s (attempt ${attempt})...`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 // Run the Fulcrum stage via either the proven browser-click path (default) or

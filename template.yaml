@@ -19,6 +19,11 @@ Globals:
         # actionable invoices. Verified in prod 2026-06-17. Set to '' to revert
         # to the browser-click path. No FULCRUM_MAX_ACTIONS = no cap.
         FULCRUM_API_MODE: '1'
+        # After issuing, poll QBO (every FULCRUM_QBO_SYNC_WAIT_MS) until every
+        # just-issued invoice is visible to the send stage, up to this cap, so
+        # newly-issued invoices send the same run instead of slipping to the next
+        # (specs/015). On timeout we proceed and reconciliation flags any unsent.
+        FULCRUM_QBO_SYNC_MAX_WAIT_MS: '120000'
     EphemeralStorage:
       Size: 2048
 

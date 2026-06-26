@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isCreateDetailTimeoutError, evaluateInvoicingUiHealth, shouldProcessRow } from '../fulcrumProcessor.js';
-import { buildFulcrumRunOptions, buildInvocationLockMetadata, buildSummaryEmailContent, customerModule, utils, resolveAuditRange, buildAuditReportEmail, buildAuditAllClearEmail } from '../V2_emailSender.js';
+import { buildFulcrumRunOptions, buildInvocationLockMetadata, buildSummaryEmailContent, customerModule, utils, resolveAuditRange, buildAuditReportEmail, buildAuditAllClearEmail, resolveTrackingNumber, trackingPlaceholderForOrder, externalDataModule, reconcileIssuedVsSent, normalizeDocNumber, waitForFulcrumQboSync, invoiceModule, qboAPI } from '../V2_emailSender.js';
+import { fulcrumInvoiceDocNumber } from '../fulcrumInvoiceApi.js';
 
 test('summary email separates explicit exclusions from allowlist misses', () => {
   const results = {
@@ -380,11 +381,14 @@ test('allowlist matches exact QBO name (case-insensitive), not substring', () =>
   assert.equal(customerModule.getSkipPolicy('Empire Fire Alarm Specialist Co., Inc').shouldSkip, false);
   assert.equal(customerModule.getSkipPolicy('  ANIXTER  ').shouldSkip, false); // trimmed
 
-  // Over-match cases are now resolved: the OTHER entity is NOT allowlisted.
+  // Over-match cases are resolved by exact matching: the OTHER entity is NOT
+  // allowlisted unless it is itself listed.
   const hochikiVes = customerModule.getSkipPolicy('HOCHIKI/VES');
   assert.equal(hochikiVes.shouldSkip, true);
   assert.equal(hochikiVes.skipCategory, 'allowlist_miss');
-  assert.equal(customerModule.getSkipPolicy('ANIXTER CANADA INC.').shouldSkip, true);
+  // "ANIXTER CANADA INC." is now explicitly allowlisted (added 2026-06-19) as its
+  // own entry, distinct from the short "ANIXTER" — exact match requires listing both.
+  assert.equal(customerModule.getSkipPolicy('ANIXTER CANADA INC.').shouldSkip, false);
 
   // A substring of an approved name must NOT match (the old danger).
   assert.equal(customerModule.getSkipPolicy('Potter').shouldSkip, true); // exact is "POTTER ELECTRIC"
@@ -571,4 +575,361 @@ test('summary email does not double-prefix Processed SOs (no "SOSO")', () => {
   assert.doesNotMatch(body, /SOSO/);
   assert.match(body, /SO9475/);
   assert.match(body, /SO9476/);
+});
+
+// ---------------------------------------------------------------------------
+// Tracking-optional shipping (HLI "Will Call" pickup orders)
+// ---------------------------------------------------------------------------
+// HLI pickups have no carrier tracking number; we record the shipping-method
+// name ("Will Call") so the invoice isn't blocked on every run. The rule is an
+// explicit (customer, method) allowlist — see TRACKING_OPTIONAL_RULES.
+
+test('resolveTrackingNumber prefers the shipment carrier tracking number when present', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: '1Z999AA10123456784', shippingMethod: { name: 'UPS Ground' } },
+    customerName: 'HLI Solutions, Inc.',
+    shipMethodName: 'UPS Ground'
+  });
+  assert.equal(tracking, '1Z999AA10123456784');
+});
+
+test('resolveTrackingNumber falls back to trackingNumbers array', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null, trackingNumbers: [null, '', 'TRACK-2'] },
+    customerName: 'Some Other Customer',
+    shipMethodName: 'FedEx'
+  });
+  assert.equal(tracking, 'TRACK-2');
+});
+
+test('resolveTrackingNumber records "Will Call" for HLI pickup orders with no tracking', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null, shippingMethod: { name: 'Will Call' } },
+    customerName: 'HLI Solutions, Inc.',
+    shipMethodName: 'Will Call'
+  });
+  assert.equal(tracking, 'Will Call');
+});
+
+test('resolveTrackingNumber keeps the original method casing as the placeholder', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null },
+    customerName: 'hli solutions',
+    shipMethodName: '  WILL CALL  '
+  });
+  assert.equal(tracking, 'WILL CALL');
+});
+
+test('resolveTrackingNumber does NOT apply the Will Call fallback to other customers', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null, shippingMethod: { name: 'Will Call' } },
+    customerName: 'ACME Fire & Security',
+    shipMethodName: 'Will Call'
+  });
+  assert.equal(tracking, null);
+});
+
+test('resolveTrackingNumber does NOT apply the fallback to HLI for non-pickup methods', () => {
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null, shippingMethod: { name: 'UPS Ground' } },
+    customerName: 'HLI Solutions, Inc.',
+    shipMethodName: 'UPS Ground'
+  });
+  assert.equal(tracking, null);
+});
+
+test('trackingPlaceholderForOrder is null when ship method is missing', () => {
+  assert.equal(trackingPlaceholderForOrder({ customerName: 'HLI Solutions, Inc.', shipMethodName: null }), null);
+  assert.equal(trackingPlaceholderForOrder({ customerName: 'HLI Solutions, Inc.', shipMethodName: '' }), null);
+});
+
+// Regression guards: the tracking-optional fix must NOT weaken the hard errors
+// that protect against missing tracking on normal orders, or ambiguous shipments.
+
+test('non-Will-Call order with no tracking still yields null (caller hard-fails the send)', () => {
+  // This is the exact case fetchExternalDataForInvoice throws on: no carrier
+  // tracking, and no tracking-optional rule applies -> null -> "Could not
+  // determine a trackingNumber" error.
+  const tracking = resolveTrackingNumber({
+    bestShipment: { trackingNumber: null, trackingNumbers: [], shippingMethod: { name: 'UPS Ground' } },
+    customerName: 'Johnson Controls Fire Protection LP',
+    shipMethodName: 'UPS Ground'
+  });
+  assert.equal(tracking, null);
+});
+
+test('chooseShipment still throws the same-date guard for two same-day top shipments', async () => {
+  // The same-date multiple-shipment guard (spec 011) is unchanged by the
+  // tracking-optional work and must still fire before any selection/tracking logic.
+  const shipments = [
+    { id: 's2', name: 'SHP-SO1234-2', shippedDate: '2026-06-18T20:06:37.000Z' },
+    { id: 's1', name: 'SHP-SO1234-1', shippedDate: '2026-06-18T08:00:00.000Z' }
+  ];
+  await assert.rejects(
+    () => externalDataModule.chooseShipment({
+      shipments,
+      qbInvoice: { DocNumber: 'F10439' },
+      fulcrumInvoice: { number: '10439', id: 'fi-1' }
+    }),
+    (err) => /Multiple shipments with same date detected/.test(err.message)
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Fulcrum→QBO sync gap reconciliation (specs/015). Protects against the silent
+// case where an invoice issued in Fulcrum syncs to QBO too late to be sent and
+// then vanishes from the summary (e.g. F10488/F10489 on 2026-06-23).
+// ---------------------------------------------------------------------------
+
+test('fulcrumInvoiceDocNumber builds the QBO DocNumber from the Fulcrum number', () => {
+  assert.equal(fulcrumInvoiceDocNumber({ number: 10488 }), 'F10488');
+  assert.equal(fulcrumInvoiceDocNumber({ number: '10489' }), 'F10489');
+  assert.equal(fulcrumInvoiceDocNumber({ number: null }), null);
+  assert.equal(fulcrumInvoiceDocNumber({}), null);
+  assert.equal(fulcrumInvoiceDocNumber(null), null);
+});
+
+test('normalizeDocNumber reduces F-prefixed and bare numbers to the same digits', () => {
+  assert.equal(normalizeDocNumber('F10488'), '10488');
+  assert.equal(normalizeDocNumber('f10488'), '10488');
+  assert.equal(normalizeDocNumber(10488), '10488');
+  assert.equal(normalizeDocNumber('  F10488 '), '10488');
+  assert.equal(normalizeDocNumber(''), null);
+  assert.equal(normalizeDocNumber(null), null);
+});
+
+test('reconcileIssuedVsSent: all issued invoices sent -> no missing', () => {
+  const { missing, unreconciledCount } = reconcileIssuedVsSent({
+    processedInvoices: [
+      { soNumber: 'SO9701', invoiceNumber: 'F10487', action: 'Issued' },
+      { soNumber: 'SO9923', invoiceNumber: 'F10486', action: 'Created & Issued' }
+    ],
+    details: [
+      { invoiceNumber: 'F10487', status: 'sent' },
+      { invoiceNumber: 'F10486', status: 'sent' }
+    ]
+  });
+  assert.deepEqual(missing, []);
+  assert.equal(unreconciledCount, 0);
+});
+
+test('reconcileIssuedVsSent: issued-but-never-fetched invoices are flagged', () => {
+  // The 2026-06-23 scenario: 8 issued, F10488/F10489 synced too late so they
+  // never appeared in the QBO send details at all (not sent/skipped/errored).
+  const { missing } = reconcileIssuedVsSent({
+    processedInvoices: [
+      { soNumber: 'SO9788', invoiceNumber: 'F10483', action: 'Issued' },
+      { soNumber: 'SO9934', invoiceNumber: 'F10488', action: 'Created & Issued' },
+      { soNumber: 'SO8963', invoiceNumber: 'F10489', action: 'Issued' }
+    ],
+    details: [
+      { invoiceNumber: 'F10483', status: 'sent' }
+    ]
+  });
+  assert.equal(missing.length, 2);
+  assert.deepEqual(missing.map(m => m.invoiceNumber).sort(), ['F10488', 'F10489']);
+  assert.equal(missing.find(m => m.invoiceNumber === 'F10488').soNumber, 'SO9934');
+});
+
+test('reconcileIssuedVsSent: fetched-then-skipped/errored counts as accounted (not flagged)', () => {
+  // Skipped (allowlist) and errored (missing email) invoices already show up in
+  // their own ACTION REQUIRED sections, so reconciliation must not double-report.
+  const { missing } = reconcileIssuedVsSent({
+    processedInvoices: [
+      { soNumber: 'SO1', invoiceNumber: 'F2001', action: 'Issued' },
+      { soNumber: 'SO2', invoiceNumber: 'F2002', action: 'Issued' }
+    ],
+    details: [
+      { invoiceNumber: 'F2001', status: 'skipped', skipCategory: 'explicit_exclusion' },
+      { invoiceNumber: 'F2002', status: 'error', error: 'Customer X has no primary email defined' }
+    ]
+  });
+  assert.deepEqual(missing, []);
+});
+
+test('reconcileIssuedVsSent: dry-run plans and unkeyed (browser-mode) entries are not flagged', () => {
+  const { missing, unreconciledCount } = reconcileIssuedVsSent({
+    processedInvoices: [
+      { soNumber: 'SO1', action: 'Issued', dryRun: true },                 // dry run
+      { soNumber: 'SO2', action: 'Issued' },                                // no invoiceNumber (browser mode)
+      { soNumber: 'SO3', invoiceNumber: 'F3003', action: 'Issued' }         // real, unsent
+    ],
+    details: []
+  });
+  assert.deepEqual(missing.map(m => m.invoiceNumber), ['F3003']);
+  assert.equal(unreconciledCount, 1);
+});
+
+test('summary email surfaces issued-but-not-sent invoices in ACTION REQUIRED and bumps the count', () => {
+  const fulcrumResults = {
+    processedInvoices: [
+      { soNumber: 'SO9788', invoiceNumber: 'F10483', action: 'Issued' },
+      { soNumber: 'SO9934', invoiceNumber: 'F10488', action: 'Created & Issued' }
+    ],
+    errors: []
+  };
+  const results = {
+    processed: 1, sent: 1, skipped: 0, errors: 0,
+    details: [
+      { invoiceId: 'q1', invoiceNumber: 'F10483', status: 'sent', email: 'a@b.com' }
+    ]
+  };
+  const { subject, body, emailContext } = buildSummaryEmailContent(results, fulcrumResults);
+  assert.match(body, /ACTION REQUIRED/);
+  assert.match(body, /F10488 \(SO9934\): issued in Fulcrum, not found in QBO send stage/);
+  // Not a false positive for the one that did send.
+  assert.ok(!/F10483: issued in Fulcrum, not found/.test(body));
+  // The gap is counted as needing attention (no more silent "0 need attention").
+  assert.equal(emailContext.qbo.actionItemCount, 1);
+  assert.match(subject, /1 need attention/);
+});
+
+// ---------------------------------------------------------------------------
+// findInvoicesByDocNumbers + waitForFulcrumQboSync poll loop (specs/015).
+// These exercise the new control flow directly (mocked QBO), so the sync race
+// fix is covered, not just the pure reconciliation helper.
+// ---------------------------------------------------------------------------
+
+test('findInvoicesByDocNumbers builds an IN-list query and returns normalized present DocNumbers', async () => {
+  const origQuery = qboAPI.query;
+  const seen = [];
+  qboAPI.query = async (q) => {
+    seen.push(q);
+    // QBO returns only F10488 (F10489 hasn't synced yet).
+    return { Invoice: [{ DocNumber: 'F10488' }] };
+  };
+  try {
+    const present = await invoiceModule.findInvoicesByDocNumbers(['F10488', 'F10489']);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /SELECT DocNumber FROM Invoice WHERE DocNumber IN \('F10488', 'F10489'\)/);
+    assert.deepEqual([...present].sort(), ['10488']); // normalized to digits
+    assert.ok(present.has('10488'));
+    assert.ok(!present.has('10489'));
+  } finally {
+    qboAPI.query = origQuery;
+  }
+});
+
+test('findInvoicesByDocNumbers chunks large input into multiple queries (<=20 each)', async () => {
+  const origQuery = qboAPI.query;
+  const sizes = [];
+  qboAPI.query = async (q) => {
+    sizes.push((q.match(/'/g) || []).length / 2); // count quoted values
+    return { Invoice: [] };
+  };
+  try {
+    const docs = Array.from({ length: 25 }, (_, i) => `F${1000 + i}`);
+    await invoiceModule.findInvoicesByDocNumbers(docs);
+    assert.equal(sizes.length, 2);          // 25 -> 20 + 5
+    assert.deepEqual(sizes, [20, 5]);
+  } finally {
+    qboAPI.query = origQuery;
+  }
+});
+
+test('findInvoicesByDocNumbers short-circuits on empty input (no query)', async () => {
+  const origQuery = qboAPI.query;
+  let called = 0;
+  qboAPI.query = async () => { called++; return { Invoice: [] }; };
+  try {
+    const present = await invoiceModule.findInvoicesByDocNumbers([]);
+    assert.equal(called, 0);
+    assert.equal(present.size, 0);
+  } finally {
+    qboAPI.query = origQuery;
+  }
+});
+
+// Helper: run waitForFulcrumQboSync with a stubbed QBO lookup and fast timers,
+// restoring globals afterward.
+async function withSyncStubs({ findImpl, waitMs = '5', maxMs = '40' }, fn) {
+  const origFind = invoiceModule.findInvoicesByDocNumbers;
+  const origWait = process.env.FULCRUM_QBO_SYNC_WAIT_MS;
+  const origMax = process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS;
+  invoiceModule.findInvoicesByDocNumbers = findImpl;
+  process.env.FULCRUM_QBO_SYNC_WAIT_MS = waitMs;
+  process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS = maxMs;
+  try {
+    return await fn();
+  } finally {
+    invoiceModule.findInvoicesByDocNumbers = origFind;
+    if (origWait === undefined) delete process.env.FULCRUM_QBO_SYNC_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_WAIT_MS = origWait;
+    if (origMax === undefined) delete process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS = origMax;
+  }
+}
+
+test('waitForFulcrumQboSync: returns after one check when all issued invoices are already visible', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => { checks++; return new Set(['10488', '10489']); }
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [
+      { invoiceNumber: 'F10488' }, { invoiceNumber: 'F10489' }
+    ]});
+  });
+  assert.equal(checks, 1);
+});
+
+test('waitForFulcrumQboSync: polls until a lagging invoice appears, then proceeds', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => {
+      checks++;
+      // F10489 syncs in only on the 3rd check.
+      return checks >= 3 ? new Set(['10488', '10489']) : new Set(['10488']);
+    }
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [
+      { invoiceNumber: 'F10488' }, { invoiceNumber: 'F10489' }
+    ]});
+  });
+  assert.equal(checks, 3);
+});
+
+test('waitForFulcrumQboSync: times out and proceeds (does not throw) when an invoice never syncs', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => { checks++; return new Set(['10488']); }, // F10489 never shows
+    waitMs: '5', maxMs: '20'
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [
+      { invoiceNumber: 'F10488' }, { invoiceNumber: 'F10489' }
+    ]});
+  });
+  assert.ok(checks >= 2); // polled, gave up, returned without throwing
+});
+
+test('waitForFulcrumQboSync: a failing poll query does not throw; it keeps polling within budget', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => { checks++; if (checks === 1) throw new Error('QBO 503'); return new Set(['10488']); },
+    waitMs: '5', maxMs: '20'
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [{ invoiceNumber: 'F10488' }] });
+  });
+  assert.equal(checks >= 2, true); // recovered from the thrown error and succeeded
+});
+
+test('waitForFulcrumQboSync: browser-mode (no invoiceNumbers) falls back to a fixed wait, no QBO query', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => { checks++; return new Set(); },
+    waitMs: '5', maxMs: '40'
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [
+      { soNumber: 'SO1' }, { soNumber: 'SO2' } // no invoiceNumber captured
+    ]});
+  });
+  assert.equal(checks, 0); // never queried QBO — fixed-wait path
+});
+
+test('waitForFulcrumQboSync: nothing issued returns immediately with no wait or query', async () => {
+  let checks = 0;
+  await withSyncStubs({
+    findImpl: async () => { checks++; return new Set(); }
+  }, async () => {
+    await waitForFulcrumQboSync({ processedInvoices: [] });
+    await waitForFulcrumQboSync(null);
+  });
+  assert.equal(checks, 0);
 });

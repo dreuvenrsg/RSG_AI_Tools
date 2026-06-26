@@ -175,6 +175,17 @@ export async function getInvoiceById(invoiceId, apiKey, { fetchImpl = fetch } = 
   return r.json();
 }
 
+// The QBO DocNumber for a Fulcrum-synced invoice is the Fulcrum invoice's numeric
+// `number` with an 'F' prefix (e.g. 10488 → "F10488") — this is the same digits
+// relationship findFulcrumInvoiceByDocNumber relies on in V2_emailSender.js. We
+// capture it per issued invoice so the QBO send stage can reconcile "issued in
+// Fulcrum" against "sent in QBO" and poll for sync by DocNumber.
+export function fulcrumInvoiceDocNumber(inv) {
+  const n = inv == null ? null : inv.number;
+  if (n === null || n === undefined || n === "") return null;
+  return Number.isFinite(Number(n)) ? `F${n}` : null;
+}
+
 // Orchestrate a create/issue run from a plan. Dependency-injected create/issue
 // so the control flow (dry-run, action cap, skip-by-construction, error
 // collection) is unit-testable without network. `create` entries are created
@@ -182,7 +193,8 @@ export async function getInvoiceById(invoiceId, apiKey, { fetchImpl = fetch } = 
 // `skip` bucket is never touched — skip parity is preserved by construction.
 export async function runInvoicingViaApi({
   plan, page, apiKey, dryRun = false, maxActions = null,
-  create = createInvoiceFromSalesOrder, issue = issueInvoiceViaApi, log = () => {},
+  create = createInvoiceFromSalesOrder, issue = issueInvoiceViaApi,
+  getInvoice = getInvoiceById, log = () => {},
 }) {
   const work = [...plan.create, ...plan.issue];
   const processedInvoices = [];
@@ -200,8 +212,17 @@ export async function runInvoicingViaApi({
       let invoiceId = item.invoiceId;
       if (item.action === "create") invoiceId = await create(page, item.salesOrderId);
       await issue(invoiceId, apiKey);
-      processedInvoices.push({ soNumber: item.soNumber, action: item.action, invoiceId });
-      log(`[API] ${item.action} + issued ${item.soNumber} (invoice ${invoiceId})`);
+      // Capture the invoice's DocNumber (e.g. "F10488") so the QBO stage can poll
+      // for its sync and reconcile sent-vs-issued. Best-effort: a read failure
+      // must not fail the (already successful) issue — leave invoiceNumber null.
+      let invoiceNumber = null;
+      try {
+        invoiceNumber = fulcrumInvoiceDocNumber(await getInvoice(invoiceId, apiKey));
+      } catch (readErr) {
+        log(`[API] issued ${item.soNumber} but could not read its invoice number (${invoiceId}): ${readErr.message}`);
+      }
+      processedInvoices.push({ soNumber: item.soNumber, action: item.action, invoiceId, invoiceNumber });
+      log(`[API] ${item.action} + issued ${item.soNumber} (invoice ${invoiceId}${invoiceNumber ? `, ${invoiceNumber}` : ""})`);
     } catch (e) {
       errors.push(`${item.soNumber}: ${e.message}`);
       log(`[API] FAILED ${item.soNumber}: ${e.message}`);
@@ -230,6 +251,7 @@ export async function runFulcrumApiMode(username, password, apiKey, { headless =
         soNumber: p.soNumber,
         action: p.action === "create" ? "Created & Issued" : "Issued",
         invoiceId: p.invoiceId,
+        invoiceNumber: p.invoiceNumber ?? null,
       })),
       errors: res.errors,
       success: res.errors.length === 0,

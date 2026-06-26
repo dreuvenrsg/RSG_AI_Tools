@@ -116,17 +116,33 @@ test('runInvoicingViaApi: create entries are created then issued; issue entries 
     plan: samplePlan(), page: {}, apiKey: 'k',
     create: async (page, soId) => { calls.push(`create:${soId}`); return `inv-${soId}`; },
     issue: async (id) => { calls.push(`issue:${id}`); },
+    getInvoice: async (id) => ({ number: 5000 + id.length }),
   });
   assert.deepEqual(calls, ['create:so1', 'issue:inv-so1', 'create:so2', 'issue:inv-so2', 'issue:inv3']);
   assert.equal(r.processedInvoices.length, 3);
   assert.equal(r.errors.length, 0);
   assert.equal(r.skipped, 1); // skip bucket never touched
+  // Each issued invoice carries its captured DocNumber for QBO sync/reconciliation.
+  assert.ok(r.processedInvoices.every(p => /^F\d+$/.test(p.invoiceNumber)));
+});
+
+test('runInvoicingViaApi: a read failure on the invoice number does not fail the issue', async () => {
+  const r = await runInvoicingViaApi({
+    plan: { create: [], issue: [{ soNumber: 'SO3', action: 'issue', invoiceId: 'inv3' }], skip: [], counts: {} },
+    page: {}, apiKey: 'k',
+    issue: async () => {},
+    getInvoice: async () => { throw new Error('read timeout'); },
+  });
+  assert.equal(r.errors.length, 0);
+  assert.equal(r.processedInvoices.length, 1);
+  assert.equal(r.processedInvoices[0].invoiceNumber, null); // best-effort: null, not a crash
 });
 
 test('runInvoicingViaApi: maxActions caps the number processed', async () => {
   const r = await runInvoicingViaApi({
     plan: samplePlan(), page: {}, apiKey: 'k', maxActions: 1,
     create: async () => 'inv', issue: async () => {},
+    getInvoice: async () => ({ number: 5001 }),
   });
   assert.equal(r.processedInvoices.length, 1);
 });
@@ -136,6 +152,7 @@ test('runInvoicingViaApi: a failed invoice is collected and does not stop the re
     plan: samplePlan(), page: {}, apiKey: 'k',
     create: async (page, soId) => { if (soId === 'so1') throw new Error('boom'); return `inv-${soId}`; },
     issue: async () => {},
+    getInvoice: async () => ({ number: 5002 }),
   });
   assert.equal(r.errors.length, 1);
   assert.match(r.errors[0], /SO1: boom/);
