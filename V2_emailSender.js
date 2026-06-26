@@ -2082,6 +2082,9 @@ const app = {
             results.errors++;
             results.details.push({
               invoiceId: invoice.DocNumber,
+              // DocNumber under invoiceNumber too, so issued-vs-sent reconciliation
+              // recognizes a fetched-then-errored invoice as accounted (not "missing").
+              invoiceNumber: invoice.DocNumber,
               status: 'error',
               error: error.message,
               rawErrorObj: JSON.stringify(error)
@@ -2090,6 +2093,10 @@ const app = {
             results.skipped++;
             results.details.push({
               invoiceId: invoice.Id,
+              // Same: carry the DocNumber so a fetched-then-skipped (excluded /
+              // allowlist-miss) invoice reconciles as accounted, and the summary
+              // shows the F-number instead of the QBO internal id.
+              invoiceNumber: invoice.DocNumber,
               status: 'skipped',
               reason: result.reason,
               skipCategory: result.skipCategory,
@@ -2448,6 +2455,21 @@ async function waitForFulcrumQboSync(fulcrumResults) {
     console.log(`[Sync] Waiting ${Math.round(intervalMs / 1000)}s for Fulcrum→QBO sync of ${issued} issued invoice(s) before QBO send (no invoice numbers captured — fixed wait)...`);
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
     return;
+  }
+
+  // The QBO access token is normally refreshed inside app.run(), which runs AFTER
+  // this. The poll queries QBO now, so the token must be ready — initialize it
+  // here if it hasn't been (app.run() refreshes again, which is harmless). If auth
+  // isn't available, don't hammer QBO with unauthenticated polls — fall back to a
+  // single fixed wait and let the QBO stage (and reconciliation) proceed.
+  if (!oauth.accessToken) {
+    try {
+      await oauth.initialize();
+    } catch (err) {
+      console.log(`[Sync] QBO auth not ready for sync poll (${err.message}); falling back to a ${Math.round(intervalMs / 1000)}s fixed wait.`);
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      return;
+    }
   }
 
   const expectedNorm = [...new Set(expectedRaw.map(normalizeDocNumber).filter(Boolean))];

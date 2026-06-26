@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isCreateDetailTimeoutError, evaluateInvoicingUiHealth, shouldProcessRow } from '../fulcrumProcessor.js';
-import { buildFulcrumRunOptions, buildInvocationLockMetadata, buildSummaryEmailContent, customerModule, utils, resolveAuditRange, buildAuditReportEmail, buildAuditAllClearEmail, resolveTrackingNumber, trackingPlaceholderForOrder, externalDataModule, reconcileIssuedVsSent, normalizeDocNumber, waitForFulcrumQboSync, invoiceModule, qboAPI } from '../V2_emailSender.js';
+import { buildFulcrumRunOptions, buildInvocationLockMetadata, buildSummaryEmailContent, customerModule, utils, resolveAuditRange, buildAuditReportEmail, buildAuditAllClearEmail, resolveTrackingNumber, trackingPlaceholderForOrder, externalDataModule, reconcileIssuedVsSent, normalizeDocNumber, waitForFulcrumQboSync, invoiceModule, qboAPI, oauth } from '../V2_emailSender.js';
 import { fulcrumInvoiceDocNumber } from '../fulcrumInvoiceApi.js';
 
 test('summary email separates explicit exclusions from allowlist misses', () => {
@@ -842,17 +842,20 @@ test('findInvoicesByDocNumbers short-circuits on empty input (no query)', async 
 
 // Helper: run waitForFulcrumQboSync with a stubbed QBO lookup and fast timers,
 // restoring globals afterward.
-async function withSyncStubs({ findImpl, waitMs = '5', maxMs = '40' }, fn) {
+async function withSyncStubs({ findImpl, waitMs = '5', maxMs = '40', accessToken = 'test-token' }, fn) {
   const origFind = invoiceModule.findInvoicesByDocNumbers;
   const origWait = process.env.FULCRUM_QBO_SYNC_WAIT_MS;
   const origMax = process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS;
+  const origToken = oauth.accessToken;
   invoiceModule.findInvoicesByDocNumbers = findImpl;
   process.env.FULCRUM_QBO_SYNC_WAIT_MS = waitMs;
   process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS = maxMs;
+  oauth.accessToken = accessToken; // truthy → poll skips the OAuth-init path
   try {
     return await fn();
   } finally {
     invoiceModule.findInvoicesByDocNumbers = origFind;
+    oauth.accessToken = origToken;
     if (origWait === undefined) delete process.env.FULCRUM_QBO_SYNC_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_WAIT_MS = origWait;
     if (origMax === undefined) delete process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_MAX_WAIT_MS = origMax;
   }
@@ -932,4 +935,83 @@ test('waitForFulcrumQboSync: nothing issued returns immediately with no wait or 
     await waitForFulcrumQboSync(null);
   });
   assert.equal(checks, 0);
+});
+
+// Auth + reconciliation regressions found by the 2026-06-26 prod test run:
+//  (1) the poll ran before oauth.initialize() (which is inside app.run), so it
+//      queried QBO with no token -> 401 every attempt. Fix: init the token first.
+//  (2) error/skipped details didn't carry the DocNumber as invoiceNumber, so a
+//      fetched-then-errored invoice (F10557, tracking guard) was falsely flagged
+//      "issued but not sent" -> a bogus 2nd ACTION REQUIRED item.
+
+test('waitForFulcrumQboSync: initializes QBO auth before polling when no token yet', async () => {
+  const origFind = invoiceModule.findInvoicesByDocNumbers;
+  const origInit = oauth.initialize;
+  const origToken = oauth.accessToken;
+  const origWait = process.env.FULCRUM_QBO_SYNC_WAIT_MS;
+  const order = [];
+  oauth.accessToken = null; // simulate "before app.run() refreshed the token"
+  oauth.initialize = async () => { order.push('init'); oauth.accessToken = 'fresh'; };
+  invoiceModule.findInvoicesByDocNumbers = async () => { order.push('poll'); return new Set(['10557']); };
+  process.env.FULCRUM_QBO_SYNC_WAIT_MS = '5';
+  try {
+    await waitForFulcrumQboSync({ processedInvoices: [{ invoiceNumber: 'F10557' }] });
+  } finally {
+    invoiceModule.findInvoicesByDocNumbers = origFind;
+    oauth.initialize = origInit;
+    oauth.accessToken = origToken;
+    if (origWait === undefined) delete process.env.FULCRUM_QBO_SYNC_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_WAIT_MS = origWait;
+  }
+  assert.deepEqual(order, ['init', 'poll']); // auth happened first, then the query
+});
+
+test('waitForFulcrumQboSync: if OAuth init fails, falls back to fixed wait without polling', async () => {
+  const origFind = invoiceModule.findInvoicesByDocNumbers;
+  const origInit = oauth.initialize;
+  const origToken = oauth.accessToken;
+  const origWait = process.env.FULCRUM_QBO_SYNC_WAIT_MS;
+  let polled = 0;
+  oauth.accessToken = null;
+  oauth.initialize = async () => { throw new Error('invalid_grant'); };
+  invoiceModule.findInvoicesByDocNumbers = async () => { polled++; return new Set(); };
+  process.env.FULCRUM_QBO_SYNC_WAIT_MS = '5';
+  try {
+    await waitForFulcrumQboSync({ processedInvoices: [{ invoiceNumber: 'F10557' }] });
+  } finally {
+    invoiceModule.findInvoicesByDocNumbers = origFind;
+    oauth.initialize = origInit;
+    oauth.accessToken = origToken;
+    if (origWait === undefined) delete process.env.FULCRUM_QBO_SYNC_WAIT_MS; else process.env.FULCRUM_QBO_SYNC_WAIT_MS = origWait;
+  }
+  assert.equal(polled, 0); // never polled QBO with a bad/absent token
+});
+
+test('reconcileIssuedVsSent: fetched-then-errored invoice (real error-detail shape) is NOT flagged missing', () => {
+  // Mirrors the prod detail shape: error details carry the DocNumber.
+  const { missing } = reconcileIssuedVsSent({
+    processedInvoices: [{ soNumber: 'SO7657', invoiceNumber: 'F10557', action: 'Created & Issued' }],
+    details: [{ invoiceId: 'F10557', invoiceNumber: 'F10557', status: 'error', error: 'Could not determine a trackingNumber' }]
+  });
+  assert.deepEqual(missing, []);
+});
+
+test('summary email: an issued invoice that was fetched and errored is not double-reported (no false sync-gap item)', () => {
+  // Reproduces the 2026-06-26 run: Fulcrum issued F10557 (HOCHIKI); QBO fetched it
+  // and it errored on the tracking guard. That is ONE action item (the tracking
+  // error), not two — reconciliation must not also flag it as "not sent".
+  const fulcrumResults = {
+    processedInvoices: [{ soNumber: 'SO7657', invoiceNumber: 'F10557', action: 'Created & Issued' }],
+    errors: []
+  };
+  const results = {
+    processed: 1, sent: 0, skipped: 0, errors: 1,
+    details: [{
+      invoiceId: 'F10557', invoiceNumber: 'F10557', status: 'error',
+      error: '[Fulcrum] Could not determine a trackingNumber: QBO Invoice: F10557'
+    }]
+  };
+  const { body, emailContext } = buildSummaryEmailContent(results, fulcrumResults);
+  assert.equal(emailContext.qbo.actionItemCount, 1);                 // only the tracking error
+  assert.doesNotMatch(body, /not found in QBO send stage/);          // no false sync-gap flag
+  assert.match(body, /Could not determine a trackingNumber/);        // the real issue is shown
 });

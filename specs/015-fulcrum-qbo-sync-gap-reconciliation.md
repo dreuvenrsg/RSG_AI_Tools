@@ -75,9 +75,30 @@ disappearing.
 - [x] Unit tests (`tests/invoiceSender.test.js`, `tests/fulcrumInvoiceApi.test.js`).
 - [x] Document in `CLAUDE.md` + `index.md`.
 
+## Prod test run (2026-06-26) — found + fixed two integration bugs
+
+A real Lambda invoke (deploy + run) issued SO7657 → F10557 (HOCHIKI) and exposed
+two issues unit tests with mocked QBO couldn't catch:
+
+1. **Poll ran before auth.** The QBO access token is refreshed inside `app.run()`,
+   which runs *after* `waitForFulcrumQboSync`, so the poll queried QBO with
+   `Bearer null` → 401 on every attempt (it still degraded correctly: retried,
+   timed out at 120s, proceeded). Fix: `waitForFulcrumQboSync` now calls
+   `oauth.initialize()` if `oauth.accessToken` is unset before polling (app.run
+   refreshes again, harmless); if auth fails it falls back to the fixed wait.
+2. **Reconciliation false-positive.** `error`/`skipped` detail rows didn't carry
+   the DocNumber as `invoiceNumber` (error stored it under `invoiceId`; skipped
+   had only the QBO internal id), so F10557 — which *was* fetched and errored on
+   the tracking guard — was wrongly flagged "issued but not sent" (a bogus 2nd
+   ACTION REQUIRED item). Fix: both pushes now set `invoiceNumber: invoice.DocNumber`,
+   so every fetched invoice reconciles as accounted (and the summary shows the
+   F-number for skipped rows too). The F10557 tracking error itself is the
+   spec-014 guard working as designed (HOCHIKI is not a Will Call customer).
+
 ## Verification
 
-- `npm test` — passing (7 new reconciliation/sync tests in `invoiceSender.test.js`;
+- `npm test` — passing (reconciliation + poll-loop + auth-ordering + the
+  fetched-then-errored regression in `invoiceSender.test.js`;
   `fulcrumInvoiceApi.test.js` extended, all injected — no network).
 - Reconciliation proven against the 2026-06-23 scenario: 8 issued, only F10483 in
   `details` → F10488/F10489 surface in ACTION REQUIRED, `actionItemCount` reflects it.
