@@ -50,32 +50,62 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Transient Zendesk failures (gateway/Envoy hiccups, brief backend outages)
+// surface as 5xx responses or as thrown network errors. These almost always
+// succeed on a retry a moment later, so we absorb them here rather than letting
+// them bubble up and trigger a "FATAL ERROR" alert/SQS retry of the whole ticket.
+const ZD_MAX_ATTEMPTS = 5;
+
 async function zdFetch(url: string, init?: RequestInit): Promise<Response> {
   assertZendeskEnv();
   const full = url.startsWith("http")
     ? url
     : `https://${ZD_SUBDOMAIN}.zendesk.com${url}`;
 
-  // Simple 429 handling via Retry-After
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const resp = await fetch(full, {
+  const doFetch = () =>
+    fetch(full, {
       ...init,
       headers: {
         ...(init?.headers || {}),
         Authorization: AUTH,
       },
     });
-    if (resp.status !== 429) return resp;
 
-    const ra = resp.headers.get("Retry-After");
-    const wait = ra ? Number(ra) * 1000 : 1500 * (attempt + 1);
-    await sleep(wait);
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < ZD_MAX_ATTEMPTS; attempt++) {
+    const isLastAttempt = attempt === ZD_MAX_ATTEMPTS - 1;
+
+    let resp: Response;
+    try {
+      resp = await doFetch();
+    } catch (err) {
+      // Network-level failure (connection reset/timeout, DNS, etc.) — retry with backoff.
+      lastErr = err;
+      if (isLastAttempt) throw err;
+      await sleep(1000 * 2 ** attempt); // 1s, 2s, 4s, 8s
+      continue;
+    }
+
+    // 429 (rate limit) — honor Retry-After when present.
+    if (resp.status === 429 && !isLastAttempt) {
+      const ra = resp.headers.get("Retry-After");
+      const wait = ra ? Number(ra) * 1000 : 1500 * (attempt + 1);
+      await sleep(wait);
+      continue;
+    }
+
+    // 5xx (transient gateway/backend errors) — back off and retry.
+    if (resp.status >= 500 && !isLastAttempt) {
+      await sleep(1000 * 2 ** attempt); // 1s, 2s, 4s, 8s
+      continue;
+    }
+
+    return resp;
   }
-  // last try
-  return fetch(full, {
-    ...init,
-    headers: { ...(init?.headers || {}), Authorization: AUTH },
-  });
+
+  // Unreachable in practice (loop either returns a response or throws on the
+  // last attempt), but satisfies the type checker.
+  throw lastErr ?? new Error(`zdFetch exhausted retries for ${full}`);
 }
 
 /**

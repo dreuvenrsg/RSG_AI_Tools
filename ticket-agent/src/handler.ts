@@ -145,20 +145,29 @@ async function processRecord(record: SQSRecord) {
 
     // Detect error type
     const errorMessage = err?.message || String(err);
-    const isQuotaError = errorMessage.includes('429') ||
-                        errorMessage.includes('quota') ||
+    // Quota errors are OpenAI-specific and genuinely non-retryable (out of credits).
+    // Match on quota signatures rather than a bare "429" so a transient Zendesk/Fulcrum
+    // 429 surfaced in an error string isn't misclassified as a permanent quota failure.
+    const isQuotaError = errorMessage.includes('quota') ||
                         errorMessage.includes('insufficient_quota');
     const isRateLimitError = errorMessage.includes('rate_limit') ||
                             errorMessage.includes('Rate limit');
 
     // Get current attempt number from SQS attributes
     const attemptNumber = Number(record.attributes?.ApproximateReceiveCount || 1);
-    const isFirstAttempt = attemptNumber === 1;
+    // Must match maxReceiveCount on PoQueue in serverless.yml — after this many
+    // failed receives the message moves to the DLQ, so no further retry happens.
+    const MAX_ATTEMPTS = 3;
+    // Alert only when no retry is coming: quota/rate-limit errors exit without
+    // retrying (see below), so their first attempt is final; everything else is
+    // retried by SQS, so transient errors (e.g. Anthropic 529s) that succeed on
+    // retry never page anyone.
+    const isFinalAttempt = isQuotaError || isRateLimitError || attemptNumber >= MAX_ATTEMPTS;
 
-    console.log(`Error on attempt ${attemptNumber}. Quota/Rate error: ${isQuotaError || isRateLimitError}`);
+    console.log(`Error on attempt ${attemptNumber}/${MAX_ATTEMPTS}. Quota/Rate error: ${isQuotaError || isRateLimitError}. Final: ${isFinalAttempt}`);
 
-    // Send detailed alert email (only on first attempt to avoid spam)
-    if (isFirstAttempt) {
+    // Send detailed alert email (only once, when retries are exhausted)
+    if (isFinalAttempt) {
       await sendAlertEmail({
         to: 'dreuven@rsgsecurity.com',
         subject: `PoProcessor ${isQuotaError ? 'QUOTA' : 'FATAL'} ERROR - Ticket ${ticketId}`,
@@ -174,15 +183,17 @@ ${err?.stack || 'N/A'}
 Record ID: ${record.messageId}
 Attempt: ${attemptNumber}
 
-${isQuotaError ? 'This error will NOT be retried. Please add credits to OpenAI account.' : 'This error will be retried up to 3 times.'}
+${isQuotaError ? 'This error will NOT be retried. Please add credits to OpenAI account.'
+  : isRateLimitError ? 'This error will NOT be retried (rate limit).'
+  : `All ${MAX_ATTEMPTS} attempts failed. The message has been moved to the dead-letter queue.`}
 
 Please investigate ${isQuotaError ? 'billing' : 'immediately'}.
         `.trim()
       });
     }
 
-    // Add error comment to ticket (ONLY on first attempt to prevent spam)
-    if (ticketId && isFirstAttempt) {
+    // Add error comment to ticket (only once, when retries are exhausted)
+    if (ticketId && isFinalAttempt) {
       try {
         await updateTicketWithResult(
           ticketId,
